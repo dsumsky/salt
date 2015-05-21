@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 '''
-Return salt data via hipchat
+Return salt data via hipchat.
+
+.. versionadded:: 2015.5.0
 
 The following fields can be set in the minion conf file::
 
@@ -21,40 +23,46 @@ the default location::
     hipchat.api_version
     hipchat.from_name
 
-Hipchat settings may also be configured as::
+Hipchat settings may also be configured as:
+
+.. code-block:: yaml
 
     hipchat:
-        room_id: RoomName
-        api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-        api_version: v1
-        from_name: user@email.com
+      room_id: RoomName
+      api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      api_version: v1
+      from_name: user@email.com
 
     alternative.hipchat:
-        room_id: RoomName
-        api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-        api_version: v1
-        from_name: user@email.com
+      room_id: RoomName
+      api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      api_version: v1
+      from_name: user@email.com
 
     hipchat_profile:
-        api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-        api_version: v1
-        from_name: user@email.com
+      api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      api_version: v1
+      from_name: user@email.com
 
     hipchat:
-        profile: hipchat_profile
-        room_id: RoomName
+      profile: hipchat_profile
+      room_id: RoomName
 
     alternative.hipchat:
-        profile: hipchat_profile
-        room_id: RoomName
+      profile: hipchat_profile
+      room_id: RoomName
 
-  To use the HipChat returner, append '--return hipchat' to the salt command. ex:
+To use the HipChat returner, append '--return hipchat' to the salt command.
 
-  .. code-block:: bash
+.. code-block:: bash
 
     salt '*' test.ping --return hipchat
 
-  To use the alternative configuration, append '--return_config alternative' to the salt command. ex:
+To use the alternative configuration, append '--return_config alternative' to the salt command.
+
+.. versionadded:: 2015.5.0
+
+.. code-block:: bash
 
     salt '*' test.ping --return hipchat --return_config alternative
 '''
@@ -66,10 +74,16 @@ import pprint
 import logging
 
 # Import 3rd-party libs
-import requests
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
 from requests.exceptions import ConnectionError
-# pylint: disable=import-error
-from salt.ext.six.moves.urllib.parse import urljoin as _urljoin  # pylint: disable=import-error,no-name-in-module
+# pylint: disable=import-error,no-name-in-module
+from salt.ext.six.moves.urllib.parse import urljoin as _urljoin
+import salt.ext.six.moves.http_client
 # pylint: enable=import-error
 
 # Import Salt Libs
@@ -121,6 +135,9 @@ def __virtual__():
 
     :return: The virtual name of the module.
     '''
+    if not HAS_REQUESTS:
+        return False
+
     return __virtualname__
 
 
@@ -213,11 +230,11 @@ def _query(function, api_key=None, api_version=None, method='GET', data=None):
         log.error(e)
         return False
 
-    if result.status_code == 200:
+    if result.status_code == salt.ext.six.moves.http_client.OK:
         result = result.json()
         response = hipchat_functions.get(api_version).get(function).get('response')
         return result.get(response)
-    elif result.status_code == 204:
+    elif result.status_code == salt.ext.six.moves.http_client.NO_CONTENT:
         return True
     else:
         log.debug(url)
@@ -268,34 +285,40 @@ def _send_message(room_id,
         return False
 
 
+def _verify_options(options):
+    '''
+    Verify Hipchat options and log warnings
+
+    Returns True if all options can be verified,
+    otherwise False
+    '''
+    if not options.get('room_id'):
+        log.error('hipchat.room_id not defined in salt config')
+        return False
+
+    if not options.get('from_name'):
+        log.error('hipchat.from_name not defined in salt config')
+        return False
+
+    if not options.get('api_key'):
+        log.error('hipchat.api_key not defined in salt config')
+        return False
+
+    if not options.get('api_version'):
+        log.error('hipchat.api_version not defined in salt config')
+        return False
+
+    return True
+
+
 def returner(ret):
     '''
-    Send an hipchat message with the data
+    Send an hipchat message with the return data from a job
     '''
 
     _options = _get_options(ret)
 
-    room_id = _options.get('room_id')
-    from_name = _options.get('from_name')
-    api_key = _options.get('api_key')
-    api_version = _options.get('api_version')
-    color = _options.get('color')
-    notify = _options.get('notify')
-
-    if not room_id:
-        log.error('hipchat.room_id not defined in salt config')
-        return
-
-    if not from_name:
-        log.error('hipchat.from_name not defined in salt config')
-        return
-
-    if not api_key:
-        log.error('hipchat.api_key not defined in salt config')
-        return
-
-    if not api_version:
-        log.error('hipchat.api_version not defined in salt config')
+    if not _verify_options(_options):
         return
 
     message = ('id: {0}\r\n'
@@ -309,11 +332,31 @@ def returner(ret):
                     ret.get('jid'),
                     pprint.pformat(ret.get('return')))
 
-    hipchat = _send_message(room_id,
+    hipchat = _send_message(_options.get('room_id'),
                             message,
-                            from_name,
-                            api_key,
-                            api_version,
-                            color,
-                            notify)
+                            _options.get('from_name'),
+                            _options.get('api_key'),
+                            _options.get('api_version'),
+                            _options.get('color'),
+                            _options.get('notify'))
     return hipchat
+
+
+def event_return(events):
+    '''
+    Return event data to hipchat
+    '''
+    _options = _get_options()
+
+    for event in events:
+        # TODO:
+        # Pre-process messages to apply individualized colors for various
+        # event types.
+        log.trace('Hipchat returner received event: {0}'.format(event))
+        _send_message(_options.get('room_id'),
+                      event['data'],
+                      _options.get('from_name'),
+                      _options.get('api_key'),
+                      _options.get('api_version'),
+                      _options.get('color'),
+                      _options.get('notify'))

@@ -166,11 +166,18 @@ def item(*args, **kwargs):
         salt '*' grains.item host sanitize=True
     '''
     ret = {}
-    for arg in args:
-        try:
-            ret[arg] = __grains__[arg]
-        except KeyError:
-            pass
+    default = kwargs.get('default', '')
+    delimiter = kwargs.get('delimiter', ':')
+
+    try:
+        for arg in args:
+            ret[arg] = salt.utils.traverse_dict_and_list(__grains__,
+                                                        arg,
+                                                        default,
+                                                        delimiter)
+    except KeyError:
+        pass
+
     if salt.utils.is_true(kwargs.get('sanitize')):
         for arg, func in six.iteritems(_SANITIZERS):
             if arg in ret:
@@ -267,7 +274,7 @@ def setval(key, val, destructive=False):
     return setvals({key: val}, destructive)
 
 
-def append(key, val, convert=False):
+def append(key, val, convert=False, delimiter=':'):
     '''
     .. versionadded:: 0.17.0
 
@@ -285,20 +292,38 @@ def append(key, val, convert=False):
         If convert is False and the grain contains non-list contents, an error
         is given. Defaults to False.
 
+    :param delimiter: The key can be a nested dict key. Use this parameter to
+        specify the delimiter you use.
+        You can now append values to a list in nested dictionnary grains. If the
+        list doesn't exist at this level, it will be created.
+        .. versionadded:: 2014.7.6
+
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' grains.append key val
     '''
-    grains = get(key, [])
+    grains = get(key, [], delimiter)
     if not isinstance(grains, list) and convert is True:
         grains = [grains]
     if not isinstance(grains, list):
         return 'The key {0} is not a valid list'.format(key)
     if val in grains:
         return 'The val {0} was already in the list {1}'.format(val, key)
-    grains.append(val)
+    if isinstance(val, list):
+        for item in val:
+            grains.append(item)
+    else:
+        grains.append(val)
+
+    while delimiter in key:
+        key, rest = key.rsplit(delimiter, 1)
+        _grain = get(key, _infinitedict(), delimiter)
+        if isinstance(_grain, dict):
+            _grain.update({rest: grains})
+        grains = _grain
+
     return setval(key, grains)
 
 
@@ -424,7 +449,7 @@ def filter_by(lookup_dict, grain='os_family', merge=None, default='default', bas
         each case to be collected in the base and overridden by the grain
         selection dictionary and the merge dictionary.  Default is unset.
 
-        .. versionadded:: Lithium
+        .. versionadded:: 2015.5.0
 
     CLI Example:
 
@@ -507,6 +532,13 @@ def get_or_set_hash(name,
     .. code-block:: bash
 
         salt '*' grains.get_or_set_hash 'django:SECRET_KEY' 50
+
+    .. warning::
+
+        This function could return strings which may contain characters which are reserved
+        as directives by the YAML parser, such as strings beginning with `%`. To avoid
+        issues when using the output of this function in an SLS file containing YAML+Jinja,
+        surround the call with single quotes.
     '''
     ret = get(name, None)
 
@@ -514,9 +546,12 @@ def get_or_set_hash(name,
         val = ''.join([random.SystemRandom().choice(chars) for _ in range(length)])
 
         if ':' in name:
-            name, rest = name.split(':', 1)
+            root, rest = name.split(':', 1)
+            curr = get(root, _infinitedict())
             val = _dict_from_path(rest, val)
-
-        setval(name, val)
+            curr.update(val)
+            setval(root, curr)
+        else:
+            setval(name, val)
 
     return get(name)

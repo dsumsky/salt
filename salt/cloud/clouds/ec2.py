@@ -12,9 +12,13 @@ To use the EC2 cloud module, set up the cloud configuration at
 .. code-block:: yaml
 
     my-ec2-config:
-      # The EC2 API authentication id
+      # The EC2 API authentication id, set this and/or key to
+      # 'use-instance-role-credentials' to use the instance role credentials
+      # from the meta-data if running on an AWS instance
       id: GKTADJGHEIQSXMKKRBJ08H
-      # The EC2 API authentication key
+      # The EC2 API authentication key, set this and/or id to
+      # 'use-instance-role-credentials' to use the instance role credentials
+      # from the meta-data if running on an AWS instance
       key: askdjghsdfjkghWupUjasdflkdfklgjsdfjajkghs
       # The ssh keyname to use
       keyname: default
@@ -82,20 +86,26 @@ import base64
 
 # Import 3rd-party libs
 # pylint: disable=import-error,no-name-in-module,redefined-builtin
-import requests
 import salt.ext.six as six
 from salt.ext.six.moves import map, range, zip
 from salt.ext.six.moves.urllib.parse import urlparse as _urlparse, urlencode as _urlencode
-# pylint: enable=no-name-in-module
+
 # Try to import PyCrypto, which may not be installed on a RAET-based system
 try:
     import Crypto
     # PKCS1_v1_5 was added in PyCrypto 2.5
     from Crypto.Cipher import PKCS1_v1_5  # pylint: disable=E0611
+    from Crypto.Hash import SHA  # pylint: disable=E0611,W0611
     HAS_PYCRYPTO = True
 except ImportError:
     HAS_PYCRYPTO = False
-# pylint: enable=import-error
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+# pylint: enable=import-error,no-name-in-module,redefined-builtin
 
 # Import salt libs
 import salt.utils
@@ -167,6 +177,9 @@ def __virtual__():
     '''
     Set up the libcloud functions and check for EC2 configurations
     '''
+    if not HAS_REQUESTS:
+        return False
+
     if get_configured_provider() is False:
         return False
 
@@ -289,11 +302,18 @@ def optimize_providers(providers):
     return optimized_providers
 
 
+def sign(key, msg):
+    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+
 def query(params=None, setname=None, requesturl=None, location=None,
           return_url=False, return_root=False):
 
     provider = get_configured_provider()
     service_url = provider.get('service_url', 'amazonaws.com')
+
+    # Retrieve access credentials from meta-data, or use provided
+    access_key_id, secret_access_key, token = aws.creds(provider)
 
     attempts = 5
     while attempts > 0:
@@ -326,39 +346,66 @@ def query(params=None, setname=None, requesturl=None, location=None,
                 return {'error': endpoint_err}
 
         log.debug('Using EC2 endpoint: {0}'.format(endpoint))
+        # AWS v4 signature
+
         method = 'GET'
+        region = location
+        service = 'ec2'
+        canonical_uri = _urlparse(requesturl).path
+        host = endpoint.strip()
+
+        # Create a date for headers and the credential string
+        t = datetime.datetime.utcnow()
+        amz_date = t.strftime('%Y%m%dT%H%M%SZ')  # Format date as YYYYMMDD'T'HHMMSS'Z'
+        datestamp = t.strftime('%Y%m%d')  # Date w/o time, used in credential scope
+
+        canonical_headers = 'host:' + host + '\n' + 'x-amz-date:' + amz_date + '\n'
+        signed_headers = 'host;x-amz-date'
+
+        payload_hash = hashlib.sha256('').hexdigest()
 
         ec2_api_version = provider.get(
             'ec2_api_version',
             DEFAULT_EC2_API_VERSION
         )
 
-        params_with_headers['AWSAccessKeyId'] = provider['id']
-        params_with_headers['SignatureVersion'] = '2'
-        params_with_headers['SignatureMethod'] = 'HmacSHA256'
-        params_with_headers['Timestamp'] = '{0}'.format(timestamp)
         params_with_headers['Version'] = ec2_api_version
-        keys = sorted(params_with_headers)
-        values = list(map(params_with_headers.get, keys))
-        querystring = _urlencode(list(zip(keys, values)))
 
-        # AWS signature version 2 requires that spaces be encoded as
-        # %20, however urlencode uses '+'. So replace pluses with %20.
+        keys = sorted(params_with_headers.keys())
+        values = map(params_with_headers.get, keys)
+        querystring = _urlencode(list(zip(keys, values)))
         querystring = querystring.replace('+', '%20')
 
-        uri = '{0}\n{1}\n{2}\n{3}'.format(method.encode('utf-8'),
-                                          endpoint.encode('utf-8'),
-                                          endpoint_path.encode('utf-8'),
-                                          querystring.encode('utf-8'))
+        canonical_request = method + '\n' + canonical_uri + '\n' + \
+                    querystring + '\n' + canonical_headers + '\n' + \
+                    signed_headers + '\n' + payload_hash
 
-        hashed = hmac.new(provider['key'], uri, hashlib.sha256)
-        sig = binascii.b2a_base64(hashed.digest())
-        params_with_headers['Signature'] = sig.strip()
+        algorithm = 'AWS4-HMAC-SHA256'
+        credential_scope = datestamp + '/' + region + '/' + service + '/' + 'aws4_request'
+
+        string_to_sign = algorithm + '\n' +  amz_date + '\n' + \
+                         credential_scope + '\n' + \
+                         hashlib.sha256(canonical_request).hexdigest()
+
+        kDate = sign(('AWS4' + provider['key']).encode('utf-8'), datestamp)
+        kRegion = sign(kDate, region)
+        kService = sign(kRegion, service)
+        signing_key = sign(kService, 'aws4_request')
+
+        signature = hmac.new(signing_key, (string_to_sign).encode('utf-8'),
+                             hashlib.sha256).hexdigest()
+        #sig = binascii.b2a_base64(hashed)
+
+        authorization_header = algorithm + ' ' + 'Credential=' + \
+                               provider['id'] + '/' + credential_scope + \
+                               ', ' +  'SignedHeaders=' + signed_headers + \
+                               ', ' + 'Signature=' + signature
+        headers = {'x-amz-date': amz_date, 'Authorization': authorization_header}
 
         log.debug('EC2 Request: {0}'.format(requesturl))
         log.trace('EC2 Request Parameters: {0}'.format(params_with_headers))
         try:
-            result = requests.get(requesturl, params=params_with_headers)
+            result = requests.get(requesturl, headers=headers, params=params_with_headers)
             log.debug(
                 'EC2 Response Status Code: {0}'.format(
                     # result.getcode()
@@ -1107,13 +1154,7 @@ def _create_eni_if_necessary(interface):
             'No such subnet <{0}>'.format(interface['SubnetId'])
         )
 
-    if 'AssociatePublicIpAddress' in interface:
-        # Associating a public address in a VPC only works when the interface is not
-        # created beforehand, but as a part of the machine creation request.
-        return interface
-
-    params = {'Action': 'CreateNetworkInterface',
-              'SubnetId': interface['SubnetId']}
+    params = {'SubnetId': interface['SubnetId']}
 
     for k in ('Description', 'PrivateIpAddress',
               'SecondaryPrivateIpAddressCount'):
@@ -1123,6 +1164,17 @@ def _create_eni_if_necessary(interface):
     for k in ('PrivateIpAddresses', 'SecurityGroupId'):
         if k in interface:
             params.update(_param_from_config(k, interface[k]))
+
+    if 'AssociatePublicIpAddress' in interface:
+        # Associating a public address in a VPC only works when the interface is not
+        # created beforehand, but as a part of the machine creation request.
+        for k in ('DeviceIndex', 'AssociatePublicIpAddress', 'NetworkInterfaceId'):
+            if k in interface:
+                params[k] = interface[k]
+        params['DeleteOnTermination'] = interface.get('delete_interface_on_terminate', True)
+        return params
+
+    params['Action'] = 'CreateNetworkInterface'
 
     result = aws.query(params,
                        return_root=True,
@@ -1803,7 +1855,7 @@ def query_instance(vm_=None, call=None):
             'An error occurred while creating VM: {0}'.format(data['error'])
         )
 
-    def __query_ip_address(params, url):
+    def __query_ip_address(params, url):  # pylint: disable=W0613
         data = aws.query(params,
                          #requesturl=url,
                          location=location,
@@ -1902,6 +1954,9 @@ def wait_for_instance(
     ssh_connect_timeout = config.get_cloud_config_value(
         'ssh_connect_timeout', vm_, __opts__, 900   # 15 minutes
     )
+    ssh_port = config.get_cloud_config_value(
+        'ssh_port', vm_, __opts__, 22
+    )
 
     if config.get_cloud_config_value('win_installer', vm_, __opts__):
         username = config.get_cloud_config_value(
@@ -1909,6 +1964,12 @@ def wait_for_instance(
         )
         win_passwd = config.get_cloud_config_value(
             'win_password', vm_, __opts__, default=''
+        )
+        win_deploy_auth_retries = config.get_cloud_config_value(
+            'win_deploy_auth_retries', vm_, __opts__, default=10
+        )
+        win_deploy_auth_retry_delay = config.get_cloud_config_value(
+            'win_deploy_auth_retry_delay', vm_, __opts__, default=1
         )
         if win_passwd and win_passwd == 'auto':
             log.debug('Waiting for auto-generated Windows EC2 password')
@@ -1938,11 +1999,14 @@ def wait_for_instance(
             )
         if not salt.utils.cloud.validate_windows_cred(ip_address,
                                                       username,
-                                                      win_passwd):
+                                                      win_passwd,
+                                                      retries=win_deploy_auth_retries,
+                                                      retry_delay=win_deploy_auth_retry_delay):
             raise SaltCloudSystemExit(
                 'Failed to authenticate against remote windows host'
             )
     elif salt.utils.cloud.wait_for_port(ip_address,
+                                        port=ssh_port,
                                         timeout=ssh_connect_timeout,
                                         gateway=ssh_gateway_config
                                         ):
@@ -1960,6 +2024,7 @@ def wait_for_instance(
                 console = get_console_output(
                     instance_id=vm_['instance_id'],
                     call='action',
+                    location=get_location(vm_)
                 )
                 pprint.pprint(console)
                 time.sleep(5)
@@ -1983,6 +2048,7 @@ def wait_for_instance(
         for user in vm_['usernames']:
             if salt.utils.cloud.wait_for_passwd(
                 host=ip_address,
+                port=ssh_port,
                 username=user,
                 ssh_timeout=config.get_cloud_config_value(
                     'wait_for_passwd_timeout', vm_, __opts__, default=1 * 60
@@ -2056,6 +2122,8 @@ def create(vm_=None, call=None):
             )
         )
     vm_['key_filename'] = key_filename
+    # wait_for_instance requires private_key
+    vm_['private_key'] = key_filename
 
     # Get SSH Gateway config early to verify the private_key,
     # if used, exists or not. We don't want to deploy an instance
@@ -2416,6 +2484,9 @@ def set_tags(name=None,
     if kwargs is None:
         kwargs = {}
 
+    if location is None:
+        location = get_location()
+
     if instance_id is None:
         if 'resource_id' in kwargs:
             resource_id = kwargs['resource_id']
@@ -2427,7 +2498,7 @@ def set_tags(name=None,
 
         if resource_id is None:
             if instance_id is None:
-                instance_id = _get_node(name, location)[name]['instanceId']
+                instance_id = _get_node(name=name, instance_id=None, location=location)[name]['instanceId']
         else:
             instance_id = resource_id
 
@@ -2454,7 +2525,7 @@ def set_tags(name=None,
     while attempts >= 0:
         result = aws.query(params,
                            setname='tagSet',
-                           location=get_location(),
+                           location=location,
                            provider=get_provider(),
                            opts=__opts__,
                            sigver='4')
@@ -3810,6 +3881,7 @@ def describe_snapshots(kwargs=None, call=None):
 
 def get_console_output(
         name=None,
+        location=None,
         instance_id=None,
         call=None,
         kwargs=None,
@@ -3825,6 +3897,9 @@ def get_console_output(
             'The get_console_output action must be called with '
             '-a or --action.'
         )
+
+    if location is None:
+        location = get_location()
 
     if not instance_id:
         instance_id = _get_node(name)[name]['instanceId']
@@ -3842,8 +3917,7 @@ def get_console_output(
 
     ret = {}
     data = aws.query(params,
-                     return_url=True,
-                     location=get_location(),
+                     location=location,
                      provider=get_provider(),
                      opts=__opts__,
                      sigver='4')

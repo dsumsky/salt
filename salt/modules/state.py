@@ -18,6 +18,7 @@ import tempfile
 import salt.config
 import salt.utils
 import salt.utils.jid
+import salt.utils.url
 import salt.state
 import salt.payload
 from salt.exceptions import SaltInvocationError
@@ -36,6 +37,10 @@ __outputter__ = {
     'highstate': 'highstate',
     'template': 'highstate',
     'template_str': 'highstate',
+    'apply': 'highstate',
+    'request': 'highstate',
+    'check_request': 'highstate',
+    'run_request': 'highstate',
 }
 
 __func_alias__ = {
@@ -183,7 +188,7 @@ def low(data, queue=False, **kwargs):
     return ret
 
 
-def high(data, queue=False, **kwargs):
+def high(data, test=False, queue=False, **kwargs):
     '''
     Execute the compound calls stored in a single set of high data
     This function is mostly intended for testing the state system
@@ -197,7 +202,21 @@ def high(data, queue=False, **kwargs):
     conflict = _check_queue(queue, kwargs)
     if conflict is not None:
         return conflict
-    st_ = salt.state.State(__opts__)
+    opts = _get_opts(kwargs.get('localconfig'))
+
+    if salt.utils.test_mode(test=test, **kwargs):
+        opts['test'] = True
+    elif test is not None:
+        opts['test'] = test
+    else:
+        opts['test'] = __opts__.get('test', None)
+
+    pillar = kwargs.get('pillar')
+    if pillar is not None and not isinstance(pillar, dict):
+        raise SaltInvocationError(
+            'Pillar data must be formatted as a dictionary'
+        )
+    st_ = salt.state.State(__opts__, pillar)
     ret = st_.call_high(data)
     _set_retcode(ret)
     return ret
@@ -253,6 +272,8 @@ def template_str(tem, queue=False, **kwargs):
 def apply_(mods=None,
           **kwargs):
     '''
+    .. versionadded:: 2015.5.0
+
     Apply states! This function will call highstate or state.sls based on the
     arguments passed in, state.apply is intended to be the main gateway for
     all state executions.
@@ -273,8 +294,10 @@ def apply_(mods=None,
 def request(mods=None,
             **kwargs):
     '''
+    .. versionadded:: 2015.5.0
+
     Request that the local admin execute a state run via
-    `salt-callstate.apply_request`
+    `salt-call state.run_request`
     All arguments match state.apply
 
     CLI Example:
@@ -312,6 +335,8 @@ def request(mods=None,
 
 def check_request(name=None):
     '''
+    .. versionadded:: 2015.5.0
+
     Return the state request information, if any
 
     CLI Example:
@@ -333,6 +358,8 @@ def check_request(name=None):
 
 def clear_request(name=None):
     '''
+    .. versionadded:: 2015.5.0
+
     Clear out the state execution request without executing it
 
     CLI Example:
@@ -372,6 +399,8 @@ def clear_request(name=None):
 
 def run_request(name='default', **kwargs):
     '''
+    .. versionadded:: 2015.5.0
+
     Execute the pending state request
 
     CLI Example:
@@ -386,7 +415,9 @@ def run_request(name='default', **kwargs):
     n_req = req[name]
     if 'mods' not in n_req or 'kwargs' not in n_req:
         return {}
-    req['kwargs'].update(kwargs)
+    req[name]['kwargs'].update(kwargs)
+    if 'test' in n_req['kwargs']:
+        n_req['kwargs'].pop('test')
     if req:
         ret = apply_(n_req['mods'], **n_req['kwargs'])
         try:
@@ -474,6 +505,9 @@ def highstate(test=None,
             'Pillar data must be formatted as a dictionary'
         )
 
+    if 'pillarenv' in kwargs:
+        opts['pillarenv'] = kwargs['pillarenv']
+
     st_ = salt.state.HighState(opts, pillar, kwargs.get('__pub_jid'))
     st_.push_active()
     try:
@@ -507,6 +541,7 @@ def sls(mods,
         exclude=None,
         queue=False,
         env=None,
+        pillarenv=None,
         **kwargs):
     '''
     Execute a set list of state files from an environment.
@@ -534,6 +569,9 @@ def sls(mods,
             Defaults to None. If no saltenv is specified, the minion config will
             be checked for a saltenv and if found, it will be used. If none is found,
             base will be used.
+    pillarenv : None
+        Specify a ``pillar_roots`` environment. By default all pillar environments
+        merged together will be used.
     concurrent:
         WARNING: This flag is potentially dangerous. It is designed
         for use when multiple state runs can safely be run at the same
@@ -563,10 +601,18 @@ def sls(mods,
         # Backwards compatibility
         saltenv = env
     if not saltenv:
-        if __opts__.get('saltenv', None):
-            saltenv = __opts__['saltenv']
+        if __opts__.get('environment', None):
+            saltenv = __opts__['environment']
         else:
             saltenv = 'base'
+    else:
+        __opts__['environment'] = saltenv
+
+    if not pillarenv:
+        if __opts__.get('pillarenv', None):
+            pillarenv = __opts__['pillarenv']
+    else:
+        __opts__['pillarenv'] = pillarenv
 
     if queue:
         _wait(kwargs.get('__pub_jid'))
@@ -711,7 +757,7 @@ def top(topfn,
 
     st_ = salt.state.HighState(opts, pillar)
     st_.push_active()
-    st_.opts['state_top'] = os.path.join('salt://', topfn)
+    st_.opts['state_top'] = salt.utils.url.create(topfn)
     try:
         ret = st_.call_highstate(
                 exclude=kwargs.get('exclude', []),
@@ -809,6 +855,8 @@ def sls_id(
         opts['test'] = True
     else:
         opts['test'] = __opts__.get('test', None)
+    if 'pillarenv' in kwargs:
+        opts['pillarenv'] = kwargs['pillarenv']
     st_ = salt.state.HighState(opts)
     if isinstance(mods, six.string_types):
         split_mods = mods.split(',')
@@ -871,6 +919,8 @@ def show_low_sls(mods,
         opts['test'] = True
     else:
         opts['test'] = __opts__.get('test', None)
+    if 'pillarenv' in kwargs:
+        opts['pillarenv'] = kwargs['pillarenv']
     st_ = salt.state.HighState(opts)
     if isinstance(mods, six.string_types):
         mods = mods.split(',')
@@ -931,6 +981,9 @@ def show_sls(mods, saltenv='base', test=None, queue=False, env=None, **kwargs):
         raise SaltInvocationError(
             'Pillar data must be formatted as a dictionary'
         )
+
+    if 'pillarenv' in kwargs:
+        opts['pillarenv'] = kwargs['pillarenv']
 
     st_ = salt.state.HighState(opts, pillar)
     if isinstance(mods, six.string_types):

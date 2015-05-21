@@ -159,6 +159,10 @@ class UtilsTestCase(TestCase):
         # Make sure we raise an error if we don't pass in the requisite number of arguments
         self.assertRaises(SaltInvocationError, utils.format_call, dummy_func, {'1': 2})
 
+        # Make sure we warn on invalid kwargs
+        ret = utils.format_call(dummy_func, {'first': 2, 'second': 2, 'third': 3})
+        self.assertGreaterEqual(len(ret['warnings']), 1)
+
         ret = utils.format_call(dummy_func, {'first': 2, 'second': 2, 'third': 3},
                                 expected_extra_kws=('first', 'second', 'third'))
         self.assertDictEqual(ret, {'args': [], 'kwargs': {}})
@@ -317,7 +321,8 @@ class UtilsTestCase(TestCase):
     def test_clean_kwargs(self):
         self.assertDictEqual(utils.clean_kwargs(foo='bar'), {'foo': 'bar'})
         self.assertDictEqual(utils.clean_kwargs(__pub_foo='bar'), {})
-        self.assertDictEqual(utils.clean_kwargs(__foo_bar='gwar'), {'__foo_bar': 'gwar'})
+        self.assertDictEqual(utils.clean_kwargs(__foo_bar='gwar'), {})
+        self.assertDictEqual(utils.clean_kwargs(foo_bar='gwar'), {'foo_bar': 'gwar'})
 
     def test_check_state_result(self):
         self.assertFalse(utils.check_state_result(None), "Failed to handle None as an invalid data type.")

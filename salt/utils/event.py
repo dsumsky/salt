@@ -2,24 +2,26 @@
 '''
 Manage events
 
-Events are all fired off via a zeromq 'pub' socket, and listened to with
-local zeromq 'sub' sockets
+Events are all fired off via a zeromq 'pub' socket, and listened to with local
+zeromq 'sub' sockets
 
 
-All of the formatting is self contained in the event module, so
-we should be able to modify the structure in the future since the same module
-used to read events is the same module used to fire off events.
+All of the formatting is self contained in the event module, so we should be
+able to modify the structure in the future since the same module used to read
+events is the same module used to fire off events.
 
-Old style event messages were comprised of two parts delimited
-at the 20 char point. The first 20 characters are used for the zeromq
-subscriber to match publications and 20 characters was chosen because it was at
-the time a few more characters than the length of a jid (Job ID).
-Any tags of length less than 20 characters were padded with "|" chars out to
-20 characters. Although not explicit, the data for an event comprised a
-python dict that was serialized by msgpack.
+Old style event messages were comprised of two parts delimited at the 20 char
+point. The first 20 characters are used for the zeromq subscriber to match
+publications and 20 characters was chosen because it was at the time a few more
+characters than the length of a jid (Job ID).  Any tags of length less than 20
+characters were padded with "|" chars out to 20 characters.
+
+Although not explicit, the data for an event comprised a python dict that was
+serialized by msgpack.
 
 New style event messages support event tags longer than 20 characters while
 still being backwards compatible with old style tags.
+
 The longer tags better enable name spaced event tags which tend to be longer.
 Moreover, the constraint that the event data be a python dict is now an
 explicit constraint and fire-event will now raise a ValueError if not. Tags
@@ -29,15 +31,14 @@ Since the msgpack dict (map) indicators have values greater than or equal to
 0x80 it can be unambiguously determined if the start of data is at char 21
 or not.
 
-In the new style:
-When the tag is longer than 20 characters, an end of tag string is appended to
-the tag given by the string constant TAGEND, that is, two line feeds '\n\n'.
-When the tag is less than 20 characters then the tag is padded with pipes
-"|" out to 20 characters as before.
-When the tag is exactly 20 characters no padded is done.
+In the new style, when the tag is longer than 20 characters, an end of tag
+string is appended to the tag given by the string constant TAGEND, that is, two
+line feeds '\n\n'.  When the tag is less than 20 characters then the tag is
+padded with pipes "|" out to 20 characters as before.  When the tag is exactly
+20 characters no padded is done.
 
-The get_event method intelligently figures out if the tag is longer than
-20 characters.
+The get_event method intelligently figures out if the tag is longer than 20
+characters.
 
 
 The convention for namespacing is to use dot characters "." as the name space
@@ -55,6 +56,7 @@ from __future__ import absolute_import
 import os
 import time
 import errno
+import signal
 import hashlib
 import logging
 import datetime
@@ -65,6 +67,11 @@ from collections import MutableMapping
 import salt.ext.six as six
 try:
     import zmq
+    import zmq.eventloop.ioloop
+    # support pyzmq 13.0.x, TODO: remove once we force people to 14.0.x
+    if not hasattr(zmq.eventloop.ioloop, 'ZMQIOLoop'):
+        zmq.eventloop.ioloop.ZMQIOLoop = zmq.eventloop.ioloop.IOLoop
+    import zmq.eventloop.zmqstream
 except ImportError:
     # Local mode does not need zmq
     pass
@@ -111,7 +118,8 @@ def get_event(node, sock_dir=None, transport='zeromq', opts=None, listen=True):
     '''
     Return an event object suitable for the named transport
     '''
-    if transport == 'zeromq':
+    # TODO: AIO core is separate from transport
+    if transport in ('zeromq', 'tcp'):
         if node == 'master':
             return MasterEvent(sock_dir or opts.get('sock_dir', None))
         return SaltEvent(node, sock_dir, opts)
@@ -127,7 +135,8 @@ def get_master_event(opts, sock_dir, listen=True):
     '''
     Return an event object suitable for the named transport
     '''
-    if opts['transport'] == 'zeromq':
+    # TODO: AIO core is separate from transport
+    if opts['transport'] in ('zeromq', 'tcp'):
         return MasterEvent(sock_dir)
     elif opts['transport'] == 'raet':
         import salt.utils.raetevent
@@ -173,6 +182,8 @@ class SaltEvent(object):
         self.opts = opts
         if sock_dir is None:
             sock_dir = opts.get('sock_dir', None)
+        if salt.utils.is_windows() and not hasattr(opts, 'ipc_mode'):
+            opts['ipc_mode'] = 'tcp'
         self.puburi, self.pulluri = self.__load_uri(sock_dir, node)
         self.subscribe()
         self.pending_events = []
@@ -200,34 +211,42 @@ class SaltEvent(object):
         # max socket path length.
         id_hash = hash_type(self.opts.get('id', '')).hexdigest()[:10]
         if node == 'master':
-            puburi = 'ipc://{0}'.format(os.path.join(
-                sock_dir,
-                'master_event_pub.ipc'
-            ))
-            salt.utils.zeromq.check_ipc_path_max_len(puburi)
-            pulluri = 'ipc://{0}'.format(os.path.join(
-                sock_dir,
-                'master_event_pull.ipc'
-            ))
-            salt.utils.zeromq.check_ipc_path_max_len(pulluri)
+            if self.opts.get('ipc_mode', '') == 'tcp':
+                puburi = 'tcp://127.0.0.1:{0}'.format(
+                    self.opts.get('tcp_master_pub_port', 4512)
+                    )
+                pulluri = 'tcp://127.0.0.1:{0}'.format(
+                    self.opts.get('tcp_master_pull_port', 4513)
+                    )
+            else:
+                puburi = 'ipc://{0}'.format(os.path.join(
+                    sock_dir,
+                    'master_event_pub.ipc'
+                    ))
+                salt.utils.zeromq.check_ipc_path_max_len(puburi)
+                pulluri = 'ipc://{0}'.format(os.path.join(
+                    sock_dir,
+                    'master_event_pull.ipc'
+                    ))
+                salt.utils.zeromq.check_ipc_path_max_len(pulluri)
         else:
             if self.opts.get('ipc_mode', '') == 'tcp':
                 puburi = 'tcp://127.0.0.1:{0}'.format(
                     self.opts.get('tcp_pub_port', 4510)
-                )
+                    )
                 pulluri = 'tcp://127.0.0.1:{0}'.format(
                     self.opts.get('tcp_pull_port', 4511)
-                )
+                    )
             else:
                 puburi = 'ipc://{0}'.format(os.path.join(
                     sock_dir,
                     'minion_event_{0}_pub.ipc'.format(id_hash)
-                ))
+                    ))
                 salt.utils.zeromq.check_ipc_path_max_len(puburi)
                 pulluri = 'ipc://{0}'.format(os.path.join(
                     sock_dir,
                     'minion_event_{0}_pull.ipc'.format(id_hash)
-                ))
+                    ))
                 salt.utils.zeromq.check_ipc_path_max_len(pulluri)
         log.debug(
             '{0} PUB socket URI: {1}'.format(self.__class__.__name__, puburi)
@@ -258,23 +277,17 @@ class SaltEvent(object):
         self.sub.connect(self.puburi)
         self.poller.register(self.sub, zmq.POLLIN)
         self.sub.setsockopt(zmq.SUBSCRIBE, '')
+        self.sub.setsockopt(zmq.LINGER, 5000)
         self.cpub = True
 
     def connect_pull(self, timeout=1000):
         '''
         Establish a connection with the event pull socket
-        Set the send timeout of the socket options to timeout (in milliseconds)
+        Set the linger timeout of the socket options to timeout (in milliseconds)
         Default timeout is 1000 ms
-        The linger timeout must be at least as long as this timeout
         '''
         self.push = self.context.socket(zmq.PUSH)
-        try:
-            # bug in 0MQ default send timeout of -1 (infinite) is not infinite
-            self.push.setsockopt(zmq.SNDTIMEO, timeout)
-        except AttributeError:
-            # This is for ZMQ < 2.2 (Caught when ssh'ing into the Jenkins
-            #                        CentOS5, which still uses 2.1.9)
-            pass
+        self.push.setsockopt(zmq.LINGER, timeout)
         self.push.connect(self.pulluri)
         self.cpush = True
 
@@ -514,10 +527,8 @@ class SaltEvent(object):
             # Wait at most 2.5 secs to send any remaining messages in the
             # socket or the context.term() below will hang indefinitely.
             # See https://github.com/zeromq/pyzmq/issues/102
-            self.sub.setsockopt(zmq.LINGER, linger)
             self.sub.close()
         if self.cpush is True and self.push.closed is False:
-            self.push.setsockopt(zmq.LINGER, linger)
             self.push.close()
         # If sockets are not unregistered from a poller, nothing which touches
         # that poller gets garbage collected. The Poller itself, its
@@ -584,8 +595,8 @@ class SaltEvent(object):
         # shutdown-- where globals start going missing
         try:
             self.destroy()
-        except Exception as ex:
-            log.debug(ex)
+        except:  # pylint: disable=W0702
+            pass
 
 
 class MasterEvent(SaltEvent):
@@ -633,6 +644,142 @@ class MinionEvent(SaltEvent):
             'minion', sock_dir=opts.get('sock_dir', None), opts=opts)
 
 
+class AsyncEventPublisher(object):
+    '''
+    An event publisher class intended to run in an ioloop (within a single process)
+
+    TODO: remove references to "minion_event" whenever we need to use this for other things
+    '''
+    def __init__(self, opts, publish_handler, io_loop=None):
+        self.opts = opts
+        self.publish_handler = publish_handler
+
+        self.io_loop = io_loop or zmq.eventloop.ioloop.ZMQIOLoop()
+        self.context = zmq.Context()
+
+        hash_type = getattr(hashlib, self.opts.get('hash_type', 'md5'))
+        # Only use the first 10 chars to keep longer hashes from exceeding the
+        # max socket path length.
+        id_hash = hash_type(self.opts.get('id', '')).hexdigest()[:10]
+        epub_sock_path = os.path.join(
+            self.opts['sock_dir'],
+            'minion_event_{0}_pub.ipc'.format(id_hash)
+        )
+        if os.path.exists(epub_sock_path):
+            os.unlink(epub_sock_path)
+        epull_sock_path = os.path.join(
+            self.opts['sock_dir'],
+            'minion_event_{0}_pull.ipc'.format(id_hash)
+        )
+        if os.path.exists(epull_sock_path):
+            os.unlink(epull_sock_path)
+
+        self.epub_sock = self.context.socket(zmq.PUB)
+
+        if self.opts.get('ipc_mode', '') == 'tcp':
+            epub_uri = 'tcp://127.0.0.1:{0}'.format(
+                self.opts['tcp_pub_port']
+            )
+            epull_uri = 'tcp://127.0.0.1:{0}'.format(
+                self.opts['tcp_pull_port']
+            )
+        else:
+            epub_uri = 'ipc://{0}'.format(epub_sock_path)
+            salt.utils.zeromq.check_ipc_path_max_len(epub_uri)
+            epull_uri = 'ipc://{0}'.format(epull_sock_path)
+            salt.utils.zeromq.check_ipc_path_max_len(epull_uri)
+
+        log.debug(
+            '{0} PUB socket URI: {1}'.format(
+                self.__class__.__name__, epub_uri
+            )
+        )
+        log.debug(
+            '{0} PULL socket URI: {1}'.format(
+                self.__class__.__name__, epull_uri
+            )
+        )
+
+        # Check to make sure the sock_dir is available, create if not
+        default_minion_sock_dir = os.path.join(
+            salt.syspaths.SOCK_DIR,
+            'minion'
+        )
+        minion_sock_dir = self.opts.get('sock_dir', default_minion_sock_dir)
+
+        if not os.path.isdir(minion_sock_dir):
+            # Let's try to create the directory defined on the configuration
+            # file
+            try:
+                os.makedirs(minion_sock_dir, 0o755)
+            except OSError as exc:
+                log.error('Could not create SOCK_DIR: {0}'.format(exc))
+                # Let's not fail yet and try using the default path
+                if minion_sock_dir == default_minion_sock_dir:
+                    # We're already trying the default system path, stop now!
+                    raise
+
+            if not os.path.isdir(default_minion_sock_dir):
+                try:
+                    os.makedirs(default_minion_sock_dir, 0o755)
+                except OSError as exc:
+                    log.error('Could not create SOCK_DIR: {0}'.format(exc))
+                    # Let's stop at this stage
+                    raise
+
+        # Create the pull socket
+        self.epull_sock = self.context.socket(zmq.PULL)
+
+        # Securely bind the event sockets
+        if self.opts.get('ipc_mode', '') != 'tcp':
+            old_umask = os.umask(0o177)
+        try:
+            log.info('Starting pub socket on {0}'.format(epub_uri))
+            self.epub_sock.bind(epub_uri)
+            log.info('Starting pull socket on {0}'.format(epull_uri))
+            self.epull_sock.bind(epull_uri)
+        finally:
+            if self.opts.get('ipc_mode', '') != 'tcp':
+                os.umask(old_umask)
+
+        self.stream = zmq.eventloop.zmqstream.ZMQStream(self.epull_sock, io_loop=self.io_loop)
+        self.stream.on_recv(self.handle_publish)
+
+    def handle_publish(self, package):
+        '''
+        Get something from epull, publish it out epub, and return the package (or None)
+        '''
+        package = package[0]
+        try:
+            self.epub_sock.send(package)
+            self.io_loop.spawn_callback(self.publish_handler, package)
+            return package
+        # Add an extra fallback in case a forked process leeks through
+        except zmq.ZMQError as exc:
+            # The interrupt caused by python handling the
+            # SIGCHLD. Throws this error with errno == EINTR.
+            # Nothing to receive on the zmq socket throws this error
+            # with EAGAIN.
+            # Both are safe to ignore
+            if exc.errno != errno.EAGAIN and exc.errno != errno.EINTR:
+                log.critical('Unexpected ZMQError while polling minion',
+                             exc_info=True)
+            return None
+
+    def destroy(self):
+        if hasattr(self, 'stream') and self.stream.closed is False:
+            self.stream.close()
+        if hasattr(self, 'epub_sock') and self.epub_sock.closed is False:
+            self.epub_sock.close()
+        if hasattr(self, 'epull_sock') and self.epull_sock.closed is False:
+            self.epull_sock.close()
+        if hasattr(self, 'context') and self.context.closed is False:
+            self.context.term()
+
+    def __del__(self):
+        self.destroy()
+
+
 class EventPublisher(multiprocessing.Process):
     '''
     The interface that takes master events and republishes them out to anyone
@@ -652,23 +799,33 @@ class EventPublisher(multiprocessing.Process):
         self.context = zmq.Context(1)
         # Prepare the master event publisher
         self.epub_sock = self.context.socket(zmq.PUB)
-        epub_uri = 'ipc://{0}'.format(
-            os.path.join(self.opts['sock_dir'], 'master_event_pub.ipc')
-        )
-        salt.utils.zeromq.check_ipc_path_max_len(epub_uri)
         # Prepare master event pull socket
         self.epull_sock = self.context.socket(zmq.PULL)
-        epull_uri = 'ipc://{0}'.format(
-            os.path.join(self.opts['sock_dir'], 'master_event_pull.ipc')
-        )
-        salt.utils.zeromq.check_ipc_path_max_len(epull_uri)
+        if self.opts.get('ipc_mode', '') == 'tcp':
+            epub_uri = 'tcp://127.0.0.1:{0}'.format(
+                self.opts.get('tcp_master_pub_port', 4512)
+                )
+            epull_uri = 'tcp://127.0.0.1:{0}'.format(
+                self.opts.get('tcp_master_pull_port', 4513)
+                )
+        else:
+            epub_uri = 'ipc://{0}'.format(
+                os.path.join(self.opts['sock_dir'], 'master_event_pub.ipc')
+                )
+            salt.utils.zeromq.check_ipc_path_max_len(epub_uri)
+            epull_uri = 'ipc://{0}'.format(
+                os.path.join(self.opts['sock_dir'], 'master_event_pull.ipc')
+                )
+            salt.utils.zeromq.check_ipc_path_max_len(epull_uri)
 
         # Start the master event publisher
         old_umask = os.umask(0o177)
         try:
             self.epull_sock.bind(epull_uri)
             self.epub_sock.bind(epub_uri)
-            if self.opts.get('client_acl') or self.opts.get('external_auth'):
+            if (self.opts.get('ipc_mode', '') != 'tcp' and (
+                    self.opts.get('client_acl') or
+                    self.opts.get('external_auth'))):
                 os.chmod(os.path.join(
                     self.opts['sock_dir'], 'master_event_pub.ipc'), 0o666)
         finally:
@@ -713,30 +870,56 @@ class EventReturn(multiprocessing.Process):
         local_minion_opts = self.opts.copy()
         local_minion_opts['file_client'] = 'local'
         self.minion = salt.minion.MasterMinion(local_minion_opts)
+        self.event_queue = []
+        self.stop = False
+
+    def sig_stop(self, signum, frame):
+        self.stop = True  # tell it to stop
+
+    def flush_events(self):
+        event_return = '{0}.event_return'.format(
+            self.opts['event_return']
+        )
+        if event_return in self.minion.returners:
+            try:
+                self.minion.returners[event_return](self.event_queue)
+            except Exception as exc:
+                log.error('Could not store events {0}. '
+                          'Returner raised exception: {1}'.format(
+                    self.event_queue, exc))
+            del self.event_queue[:]
+        else:
+            log.error(
+                'Could not store return for event(s) {0}. Returner '
+                '\'{1}\' not found.'
+                    .format(self.event_queue, self.opts['event_return'])
+            )
 
     def run(self):
         '''
         Spin up the multiprocess event returner
         '''
+        # Properly exit if a SIGTERM is signalled
+        signal.signal(signal.SIGTERM, self.sig_stop)
+
         salt.utils.appendproctitle(self.__class__.__name__)
         self.event = get_event('master', opts=self.opts)
         events = self.event.iter_events(full=True)
         self.event.fire_event({}, 'salt/event_listen/start')
-        event_queue = []
         try:
             for event in events:
                 if self._filter(event):
-                    event_queue.append(event)
-                if len(event_queue) >= self.event_return_queue:
-                    self.minion.returners[
-                        '{0}.event_return'.format(self.opts['event_return'])
-                    ](event_queue)
-                    event_queue = []
-        except KeyError:
-            log.error((
-                'Could not store return for events {0}. Returner {1} '
-                'not found.'
-            ).format(events, self.opts.get('event_return', None)))
+                    self.event_queue.append(event)
+                if len(self.event_queue) >= self.event_return_queue:
+                    self.flush_events()
+                if self.stop:
+                    break
+        except zmq.error.ZMQError as exc:
+            if exc.errno != errno.EINTR:  # Outside interrupt is a normal shutdown case
+                raise
+        finally:  # flush all we have at this moment
+            if self.event_queue:
+                self.flush_events()
 
     def _filter(self, event):
         '''

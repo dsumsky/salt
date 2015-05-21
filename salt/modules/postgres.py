@@ -73,8 +73,7 @@ def __virtual__():
     return False
 
 
-def _run_psql(cmd, runas=None, password=None, host=None, port=None, user=None,
-              run_cmd='cmd.run_all'):
+def _run_psql(cmd, runas=None, password=None, host=None, port=None, user=None):
     '''
     Helper function to call psql, because the password requirement
     makes this too much code to be repeated in each function below
@@ -114,7 +113,7 @@ def _run_psql(cmd, runas=None, password=None, host=None, port=None, user=None,
             __salt__['file.chown'](pgpassfile, runas, '')
             kwargs['env'] = {'PGPASSFILE': pgpassfile}
 
-    ret = __salt__[run_cmd](cmd, python_shell=False, **kwargs)
+    ret = __salt__['cmd.run_all'](cmd, python_shell=False, **kwargs)
 
     if ret.get('retcode', 0) != 0:
         log.error('Error connecting to Postgresql server')
@@ -401,7 +400,7 @@ def db_create(name,
 
 
 def db_alter(name, user=None, host=None, port=None, maintenance_db=None,
-             password=None, tablespace=None, owner=None,
+             password=None, tablespace=None, owner=None, owner_recurse=False,
              runas=None):
     '''
     Change tablespace or/and owner of database.
@@ -415,22 +414,31 @@ def db_alter(name, user=None, host=None, port=None, maintenance_db=None,
     if not any((tablespace, owner)):
         return True  # Nothing todo?
 
-    queries = []
-    if owner:
-        queries.append('ALTER DATABASE "{0}" OWNER TO "{1}"'.format(
-            name, owner
-        ))
-    if tablespace:
-        queries.append('ALTER DATABASE "{0}" SET TABLESPACE "{1}"'.format(
-            name, tablespace
-        ))
-    for query in queries:
-        ret = _psql_prepare_and_run(['-c', query],
-                                    user=user, host=host, port=port,
-                                    maintenance_db=maintenance_db,
-                                    password=password, runas=runas)
-        if ret['retcode'] != 0:
-            return False
+    if owner and owner_recurse:
+        ret = owner_to(name, owner,
+                       user=user,
+                       host=host,
+                       port=port,
+                       password=password,
+                       runas=runas)
+    else:
+        queries = []
+        if owner:
+            queries.append('ALTER DATABASE "{0}" OWNER TO "{1}"'.format(
+                name, owner
+            ))
+        if tablespace:
+            queries.append('ALTER DATABASE "{0}" SET TABLESPACE "{1}"'.format(
+                name, tablespace
+            ))
+        for query in queries:
+            ret = _psql_prepare_and_run(['-c', query],
+                                        user=user, host=host, port=port,
+                                        maintenance_db=maintenance_db,
+                                        password=password, runas=runas)
+
+    if ret['retcode'] != 0:
+        return False
 
     return True
 
@@ -449,6 +457,151 @@ def db_remove(name, user=None, host=None, port=None, maintenance_db=None,
 
     # db doesn't exist, proceed
     query = 'DROP DATABASE {0}'.format(name)
+    ret = _psql_prepare_and_run(['-c', query],
+                                user=user,
+                                host=host,
+                                port=port,
+                                runas=runas,
+                                maintenance_db=maintenance_db,
+                                password=password)
+    return ret['retcode'] == 0
+
+
+# Tablespace related actions
+
+def tablespace_list(user=None, host=None, port=None, maintenance_db=None,
+                    password=None, runas=None):
+    '''
+    Return dictionary with information about tablespaces of a Postgres server.
+    CLI Example:
+    .. code-block:: bash
+        salt '*' postgres.tablespace_list
+    .. versionadded:: Beryllium
+    '''
+
+    ret = {}
+
+    query = (
+        'SELECT spcname as "Name", pga.rolname as "Owner", spcacl as "ACL", '
+        'spcoptions as "Opts", pg_tablespace_location(pgts.oid) as "Location" '
+        'FROM pg_tablespace pgts, pg_roles pga WHERE pga.oid = pgts.spcowner'
+    )
+
+    rows = __salt__['postgres.psql_query'](query, runas=runas, host=host,
+                                           user=user, port=port,
+                                           maintenance_db=maintenance_db,
+                                           password=password)
+
+    for row in rows:
+        ret[row['Name']] = row
+        ret[row['Name']].pop('Name')
+
+    return ret
+
+
+def tablespace_exists(name, user=None, host=None, port=None, maintenance_db=None,
+              password=None, runas=None):
+    '''
+    Checks if a tablespace exists on the Postgres server.
+    CLI Example:
+    .. code-block:: bash
+        salt '*' postgres.tablespace_exists 'dbname'
+    .. versionadded:: Beryllium
+    '''
+
+    tablespaces = tablespace_list(user=user, host=host, port=port,
+                        maintenance_db=maintenance_db,
+                        password=password, runas=runas)
+    return name in tablespaces
+
+
+def tablespace_create(name, location, options=None, owner=None, user=None,
+                      host=None, port=None, maintenance_db=None, password=None,
+                      runas=None):
+    '''
+    Adds a tablespace to the Postgres server.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' postgres.tablespace_create tablespacename '/path/datadir'
+    .. versionadded:: Beryllium
+    '''
+    owner_query = ''
+    options_query = ''
+    if owner:
+        owner_query = 'OWNER {0}'.format(owner)
+        # should come out looking like: 'OWNER postgres'
+    if options:
+        optionstext = ['{0} = {1}'.format(k, v) for k, v in options.items()]
+        options_query = 'WITH ( {0} )'.format(', '.join(optionstext))
+        # should come out looking like: 'WITH ( opt1 = 1.0, opt2 = 4.0 )'
+    query = 'CREATE TABLESPACE {0} {1} LOCATION \'{2}\' {3}'.format(name,
+                                                                owner_query,
+                                                                location,
+                                                                options_query)
+
+    # Execute the command
+    ret = _psql_prepare_and_run(['-c', query],
+                                user=user, host=host, port=port,
+                                maintenance_db=maintenance_db,
+                                password=password, runas=runas)
+    return ret['retcode'] == 0
+
+
+def tablespace_alter(name, user=None, host=None, port=None, maintenance_db=None,
+                     password=None, new_name=None, new_owner=None,
+                     set_option=None, reset_option=None, runas=None):
+    '''
+    Change tablespace name, owner, or options.
+    CLI Example:
+    .. code-block:: bash
+        salt '*' postgres.tablespace_alter tsname new_owner=otheruser
+        salt '*' postgres.tablespace_alter index_space new_name=fast_raid
+        salt '*' postgres.tablespace_alter test set_option="{'seq_page_cost': '1.1'}"
+        salt '*' postgres.tablespace_alter tsname reset_option=seq_page_cost
+    .. versionadded:: Beryllium
+    '''
+    if not any([new_name, new_owner, set_option, reset_option]):
+        return True  # Nothing todo?
+
+    queries = []
+
+    if new_name:
+        queries.append('ALTER TABLESPACE {0} RENAME TO {1}'.format(
+                       name, new_name))
+    if new_owner:
+        queries.append('ALTER TABLESPACE {0} OWNER TO {1}'.format(
+                       name, new_owner))
+    if set_option:
+        queries.append('ALTER TABLESPACE {0} SET ({1} = {2})'.format(
+                       name, set_option.keys()[0], set_option.values()[0]))
+    if reset_option:
+        queries.append('ALTER TABLESPACE {0} RESET ({1})'.format(
+                       name, reset_option))
+
+    for query in queries:
+        ret = _psql_prepare_and_run(['-c', query],
+                                    user=user, host=host, port=port,
+                                    maintenance_db=maintenance_db,
+                                    password=password, runas=runas)
+        if ret['retcode'] != 0:
+            return False
+
+    return True
+
+
+def tablespace_remove(name, user=None, host=None, port=None,
+                      maintenance_db=None, password=None, runas=None):
+    '''
+    Removes a tablespace from the Postgres server.
+    CLI Example:
+    .. code-block:: bash
+        salt '*' postgres.tablespace_remove tsname
+    .. versionadded:: Beryllium
+    '''
+    query = 'DROP TABLESPACE {0}'.format(name)
     ret = _psql_prepare_and_run(['-c', query],
                                 user=user,
                                 host=host,
@@ -550,6 +703,35 @@ def user_list(user=None, host=None, port=None, maintenance_db=None,
             retrow['password'] = row['password']
         ret[row['name']] = retrow
 
+    # for each role, determine the inherited roles
+    for role in six.iterkeys(ret):
+        rdata = ret[role]
+        groups = rdata.setdefault('groups', [])
+        query = (
+            'select rolname'
+            ' from pg_user'
+            ' join pg_auth_members'
+            '      on (pg_user.usesysid=pg_auth_members.member)'
+            ' join pg_roles '
+            '      on (pg_roles.oid=pg_auth_members.roleid)'
+            ' where pg_user.usename=\'{0}\''
+        ).format(role)
+        try:
+            rows = psql_query(query,
+                              runas=runas,
+                              host=host,
+                              user=user,
+                              port=port,
+                              maintenance_db=maintenance_db,
+                              password=password)
+            for row in rows:
+                if row['rolname'] not in groups:
+                    groups.append(row['rolname'])
+        except Exception:
+            # do not fail here, it is just a bonus
+            # to try to determine groups, but the query
+            # is not portable amongst all pg versions
+            continue
     return ret
 
 

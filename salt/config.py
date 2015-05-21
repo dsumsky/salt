@@ -36,6 +36,7 @@ import salt.syspaths
 import salt.utils.validate.path
 import salt.utils.xdg
 import salt.exceptions
+import salt.utils.sdb
 
 log = logging.getLogger(__name__)
 
@@ -46,117 +47,378 @@ _DFLT_LOG_FMT_LOGFILE = (
     '%(asctime)s,%(msecs)03.0f [%(name)-17s][%(levelname)-8s][%(process)d] %(message)s'
 )
 
+if salt.utils.is_windows():
+    # Since an 'ipc_mode' of 'ipc' will never work on Windows due to lack of
+    # support in ZeroMQ, we want the default to be something that has a
+    # chance of working.
+    _DFLT_IPC_MODE = 'tcp'
+else:
+    _DFLT_IPC_MODE = 'ipc'
+
 FLO_DIR = os.path.join(
         os.path.dirname(__file__),
         'daemons', 'flo')
 
 VALID_OPTS = {
+    # The address of the salt master. May be specified as IP address or hostname
     'master': str,
+
+    # The TCP/UDP port of the master to connect to in order to listen to publications
     'master_port': int,
+
+    # The behaviour of the minion when connecting to a master. Can specify 'failover',
+    # or 'func'. If 'func' is specified, the 'master' option should be set to an exec
+    # module function to run to determine the master hostname.
     'master_type': str,
+
+    # The fingerprint of the master key may be specified to increase security. Generate
+    # a master fingerprint with `salt-key -F master`
     'master_finger': str,
+
+    # Selects a random master when starting a minion up in multi-master mode
     'master_shuffle': bool,
+
+    # When in mulit-master mode, temporarily remove a master from the list if a conenction
+    # is interrupted and try another master in the list.
     'master_alive_interval': int,
+
+    # The name of the signing key-pair
     'master_sign_key_name': str,
+
+    # Sign the master auth-replies with a cryptographic signature of the masters public key.
     'master_sign_pubkey': bool,
+
+    # Enables verification of the master-public-signature returned by the master in auth-replies.
+    # Must also set master_sign_pubkey for this to work
     'verify_master_pubkey_sign': bool,
+
+    # If verify_master_pubkey_sign is enabled, the signature is only verified, if the public-key of the master changes.
+    # If the signature should always be verified, this can be set to True.
     'always_verify_signature': bool,
+
+    # The name of the file in the masters pki-directory that holds the pre-calculated signature of the masters public-key.
     'master_pubkey_signature': str,
+
+    # Instead of computing the signature for each auth-reply, use a pre-calculated signature.
+    # The master_pubkey_signature must also be set for this.
     'master_use_pubkey_signature': bool,
+
+    # The key fingerprint of the higher-level master for the syndic to verify it is talking to the intended
+    # master
     'syndic_finger': str,
+
+    # The user under which the daemon should run
     'user': str,
+
+    # The root directory prepended to these options: pki_dir, cachedir,
+    # sock_dir, log_file, autosign_file, autoreject_file, extension_modules,
+    # key_logfile, pidfile:
     'root_dir': str,
+
+    # The directory used to store public key data
     'pki_dir': str,
+
+    # A unique identifier for this daemon
     'id': str,
+
+    # The directory to store all cache files.
     'cachedir': str,
+
+    # Flag to cache jobs locally.
     'cache_jobs': bool,
+
+    # The path to the salt configuration file
     'conf_file': str,
+
+    # The directory containing unix sockets for things like the event bus
     'sock_dir': str,
+
+    # Specifies how the file server should backup files, if enabled. The backups
+    # live in the cache dir.
     'backup_mode': str,
+
+    # A default renderer for all operations on this host
     'renderer': str,
+
+    # A flag indicating that a highstate run should immediately cease if a failure occurs.
     'failhard': bool,
+
+    # A flag to indicate that highstate runs should force refresh the modules prior to execution
     'autoload_dynamic_modules': bool,
+
+    # Force the minion into a single environment when it fetches files from the master
     'environment': str,
+
+    # Force the minion into a single pillar root when it fetches pillar data from the master
+    'pillarenv': str,
+
+    # Allows a user to provide an alternate name for top.sls
     'state_top': str,
+
+    # States to run when a minion starts up
     'startup_states': str,
+
+    # List of startup states
     'sls_list': list,
+
+    # A top file to execute if startup_states == 'top'
     'top_file': str,
+
+    # Location of the files a minion should look for. Set to 'local' to never ask the master.
     'file_client': str,
+
+    # When using a local file_client, this parameter is used to allow the client to connect to
+    # a master for remote execution.
     'use_master_when_local': bool,
+
+    # A map of saltenvs and fileserver backend locations
     'file_roots': dict,
+
+    # A map of saltenvs and fileserver backend locations
     'pillar_roots': dict,
+
+    # The type of hashing algorithm to use when doing file comparisons
     'hash_type': str,
+
+    # FIXME Does not appear to be implemented
     'disable_modules': list,
+
+    # FIXME Does not appear to be implemented
     'disable_returners': list,
+
+    # Tell the loader to only load modules in this list
     'whitelist_modules': list,
+
+    # A list of additional directories to search for salt modules in
     'module_dirs': list,
+
+    # A list of additional directories to search for salt returners in
     'returner_dirs': list,
+
+    # A list of additional directories to search for salt states in
     'states_dirs': list,
+
+    # A list of additional directories to search for salt grains in
     'grains_dirs': list,
+
+    # A list of additional directories to search for salt renderers in
     'render_dirs': list,
+
+    # A list of additional directories to search for salt outputters in
     'outputter_dirs': list,
+
+    # A list of additional directories to search for salt utilities in. (Used by the loader
+    # to populate __utils__)
     'utils_dirs': list,
+
+    # salt cloud providers
     'providers': dict,
+
+    # First remove all modules during any sync operation
     'clean_dynamic_modules': bool,
+
+    # A flag indicating that a master should accept any minion connection without any authentication
     'open_mode': bool,
+
+    # Whether or not processes should be forked when needed. The altnerative is to use threading.
     'multiprocessing': bool,
+
+    # Schedule a mine update every n number of seconds
     'mine_interval': int,
+
+    # The ipc strategy. (i.e., sockets versus tcp, etc)
     'ipc_mode': str,
+
+    # Enable ipv6 support for deamons
     'ipv6': bool,
+
+    # The chunk size to use when streaming files with the file server
     'file_buffer_size': int,
+
+    # The TCP port on which minion events should be published if ipc_mode is TCP
     'tcp_pub_port': int,
+
+    # The TCP port on which minion events should be pulled if ipc_mode is TCP
     'tcp_pull_port': int,
+
+    # The TCP port on which events for the master should be pulled if ipc_mode is TCP
+    'tcp_master_pub_port': int,
+
+    # The TCP port on which events for the master should be pulled if ipc_mode is TCP
+    'tcp_master_pull_port': int,
+
+    # The TCP port on which events for the master should pulled and then republished onto
+    # the event bus on the master
+    'tcp_master_publish_pull': int,
+
+    # The TCP port for mworkers to connect to on the master
+    'tcp_master_workers': int,
+
+    # The file to send logging data to
     'log_file': str,
+
+    # The level of verbosity at which to log
     'log_level': bool,
+
+    # The log level to log to a given file
     'log_level_logfile': bool,
+
+    # The format to construct dates in log files
     'log_datefmt': str,
+
+    # The dateformat for a given logfile
     'log_datefmt_logfile': str,
+
+    # The format for console logs
     'log_fmt_console': str,
+
+    # The format for a given log file
     'log_fmt_logfile': tuple,
+
+    # A dictionary of logging levels
     'log_granular_levels': dict,
+
+    # If an event is above this size, it will be trimmed before putting it on the event bus
     'max_event_size': int,
+
+    # Always execute states with test=True if this flag is set
     'test': bool,
+
+    # Tell the loader to attempt to import *.pyx cython files if cython is available
     'cython_enable': bool,
+
+    # Tell the client to show minions that have timed out
     'show_timeout': bool,
+
+    # Tell the client to display the jid when a job is published
     'show_jid': bool,
+
+    # Tells the highstate outputter to show successful states. False will omit successes.
     'state_verbose': bool,
+
+    # Specify the format for state outputs. See highstate outputter for additional details.
     'state_output': str,
+
+    # When true, states run in the order defined in an SLS file, unless requisites re-order them
     'state_auto_order': bool,
+
+    # Fire events as state chunks are processed by the state compiler
     'state_events': bool,
+
+    # The number of seconds a minion should wait before retry when attempting authentication
     'acceptance_wait_time': float,
+
+    # The number of seconds a minion should wait before giving up during authentication
     'acceptance_wait_time_max': float,
+
+    # Retry a connection attempt if the master rejects a minion's public key
     'rejected_retry': bool,
+
+    # The interval in which a daemon's main loop should attempt to perform all necessary tasks
+    # for normal operation
     'loop_interval': float,
+
+    # Perform pre-flight verification steps before daemon startup, such as checking configuration
+    # files and certain directories.
     'verify_env': bool,
+
+    # The grains dictionary for a minion, containing specific "facts" about the minion
     'grains': dict,
+
+    # Allow a deamon to function even if the key directories are not secured
     'permissive_pki_access': bool,
+
+    # The path to a directory to pull in configuration file includes
     'default_include': str,
+
+    # If a minion is running an esky build of salt, upgrades can be performed using the url
+    # defined here. See saltutil.update() for additional information
     'update_url': bool,
+
+    # If using update_url with saltutil.update(), provide a list of services to be restarted
+    # post-install
     'update_restart_services': list,
+
+    # The number of seconds to sleep between retrying an attempt to resolve the hostname of a
+    # salt master
     'retry_dns': float,
+
+    # set the zeromq_reconnect_ivl option on the minion.
+    # http://lists.zeromq.org/pipermail/zeromq-dev/2011-January/008845.html
     'recon_max': float,
+
+    # If recon_randomize is set, this specifies the lower bound for the randomized period
     'recon_default': float,
-    'recon_randomize': float,
+
+    # Tells the minion to choose a bounded, random interval to have zeromq attempt to reconnect
+    # in the event of a disconnect event
+    'recon_randomize': float,  # FIXME This should really be a bool, according to the implementation
+
+    # Specify a returner in which all events will be sent to. Requires that the returner in question
+    # have an event_return(event) function!
     'event_return': str,
+
+    # The number of events to queue up in memory before pushing them down the pipe to an event returner
+    # specified by 'event_return'
     'event_return_queue': int,
+
+    # Only forward events to an event returner if it matches one of the tags in this list
     'event_return_whitelist': list,
+
+    # Events matching a tag in this list should never be sent to an event returner.
     'event_return_blacklist': list,
+
+    # The file cache for the win_pkg module
     'win_repo_cachefile': str,
+
+    # This pidfile to write out to when a deamon starts
     'pidfile': str,
+
+    # Used with the SECO range master tops system
     'range_server': str,
+
+    # The tcp keepalive interval to set on TCP ports. This setting can be used to tune salt connectivity
+    # issues in messy network environments with misbeahving firewalls
     'tcp_keepalive': bool,
+
+    # Sets zeromq TCP keepalive idle. May be used to tune issues with minion disconnects
     'tcp_keepalive_idle': float,
+
+    # Sets zeromq TCP keepalive count. May be used to tune issues with minion disconnects
     'tcp_keepalive_cnt': float,
+
+    # Sets zeromq TCP keepalive interval. May be used to tune issues with minion disconnects.
     'tcp_keepalive_intvl': float,
+
+    # The network interface for a daemon to bind to
     'interface': str,
+
+    # The port for a salt master to broadcast publications on. This will also be the port minions
+    # connect to to listen for publications.
     'publish_port': int,
+
+    # TODO unknown option!
     'auth_mode': int,
+
+    # Set the zeromq high water mark on the publisher interface.
+    # http://api.zeromq.org/3-2:zmq-setsockopt
     'pub_hwm': int,
-    'rep_hwm': int,
+
+    # The number of MWorker processes for a master to startup. This number needs to scale up as
+    # the number of connected minions increases.
     'worker_threads': int,
+
+    # The port for the master to listen to returns on. The minion needs to connect to this port
+    # to send returns.
     'ret_port': int,
+
+    # The number of hours to keep jobs around in the job cache on the master
     'keep_jobs': int,
+
+    # A master-only copy of the file_roots dictionary, used by the state compiler
     'master_roots': dict,
+
+
     'gitfs_remotes': list,
     'gitfs_mountpoint': str,
     'gitfs_root': str,
@@ -188,9 +450,18 @@ VALID_OPTS = {
     'minionfs_mountpoint': str,
     'minionfs_whitelist': list,
     'minionfs_blacklist': list,
+
+    # Specify a list of external pillar systems to use
     'ext_pillar': list,
+
+    # Reserved for future use to version the pillar structure
     'pillar_version': int,
+
+    # Whether or not a copy of the master opts dict should be rendered into minion pillars
     'pillar_opts': bool,
+
+
+    'pillar_safe_render_error': bool,
     'pillar_source_merging_strategy': str,
     'ping_on_rotate': bool,
     'peer': dict,
@@ -210,47 +481,134 @@ VALID_OPTS = {
     'fileserver_followsymlinks': bool,
     'fileserver_ignoresymlinks': bool,
     'fileserver_limit_traversal': bool,
+
+    # The number of open files a daemon is allowed to have open. Frequently needs to be increased
+    # higher than the system default in order to account for the way zeromq consumes file handles.
     'max_open_files': int,
+
+    # Automatically accept any key provided to the master. Implies that the key will be preserved
+    # so that subsequent connections will be authenticated even if this option has later been
+    # turned off.
     'auto_accept': bool,
     'autosign_timeout': int,
-    'master_tops': bool,
+
+    # A mapping of external systems that can be used to generate topfile data.
+    'master_tops': bool,  # FIXME Should be dict?
+
+    # A flag that should be set on a top-level master when it is ordering around subordinate masters
+    # via the use of a salt syndic
     'order_masters': bool,
+
+    # Whether or not to cache jobs so that they can be examined later on
     'job_cache': bool,
+
+    # Define a returner to be used as an external job caching storage backend
     'ext_job_cache': str,
+
+    # Specify a returner for the master to use as a backend storage system to cache jobs returns
+    # that it receives
     'master_job_cache': str,
+
+    # The minion data cache is a cache of information about the minions stored on the master.
+    # This information is primarily the pillar and grains data. The data is cached in the master
+    # cachedir under the name of the minion and used to predetermine what minions are expected to
+    # reply from executions.
     'minion_data_cache': bool,
+
+    # The number of seconds between AES key rotations on the master
     'publish_session': int,
+
+    # Defines a salt reactor. See http://docs.saltstack.com/en/latest/topics/reactor/
     'reactor': list,
+
+    # The TTL for the cache of the reactor configuration
     'reactor_refresh_interval': int,
+
+    # The number of workers for the runner/wheel in the reactor
     'reactor_worker_threads': int,
+
+    # The queue size for workers in the reactor
     'reactor_worker_hwm': int,
+
     'serial': str,
     'search': str,
+
+    # The update interval, in seconds, for the master maintenance process to update the search
+    # index
     'search_index_interval': int,
+
+    # A compound target definition. See: http://docs.saltstack.com/en/latest/topics/targeting/nodegroups.html
     'nodegroups': dict,
+
+    # The logfile location for salt-key
     'key_logfile': str,
+
     'win_repo': str,
     'win_repo_mastercachefile': str,
     'win_gitrepos': list,
+
+    # Set a hard limit for the amount of memory modules can consume on a minion.
     'modules_max_memory': int,
+
+    # The number of minutes between the minion refreshing its cache of grains
     'grains_refresh_every': int,
+
+    # Use lspci to gather system data for grains on a minion
     'enable_lspci': bool,
+
+    # The number of seconds for the salt client to wait for additional syndics to
+    # check in with their lists of expected minions before giving up
     'syndic_wait': int,
+
+    # If this is set to True leading spaces and tabs are stripped from the start
+    # of a line to a block.
     'jinja_lstrip_blocks': bool,
+
+    # If this is set to True the first newline after a Jinja block is removed
     'jinja_trim_blocks': bool,
+
+    # FIXME Appears to be unused
     'minion_id_caching': bool,
+
+    # If set, the master will sign all publications before they are sent out
     'sign_pub_messages': bool,
+
+    # The size of key that should be generated when creating new keys
     'keysize': int,
+
+    # The transport system for this deamon. (i.e. zeromq, raet, etc)
     'transport': str,
+
+    # FIXME Appears to be unused
     'enumerate_proxy_minions': bool,
+
+    # The number of seconds to wait when the client is requesting information about running jobs
     'gather_job_timeout': int,
+
+    # The number of seconds to wait before timing out an authentication request
     'auth_timeout': int,
+
+    # The number of attempts to authenticate to a master before giving up
     'auth_tries': int,
+
+    # Never give up when trying to authenticate to a master
     'auth_safemode': bool,
+
     'random_master': bool,
+
+    # An upper bound for the amount of time for a minion to sleep before attempting to
+    # reauth after a restart.
     'random_reauth_delay': int,
+
+    # The number of seconds for a syndic to poll for new messages that need to be forwarded
     'syndic_event_forward_timeout': float,
+
+    # The number of seconds for the syndic to spend polling the event bus
     'syndic_max_event_process_time': float,
+
+    # The length that the syndic event queue must hit before events are popped off and forwarded
+    'syndic_jid_forward_cache_hwm': int,
+
     'ssh_passwd': str,
     'ssh_port': str,
     'ssh_sudo': bool,
@@ -258,10 +616,19 @@ VALID_OPTS = {
     'ssh_user': str,
     'ssh_scan_ports': str,
     'ssh_scan_timeout': float,
+
+    # Enable ioflo verbose logging. Warning! Very verbose!
     'ioflo_verbose': int,
+
     'ioflo_period': float,
+
+    # Set ioflo to realtime. Useful only for testing/debugging to simulate many ioflo periods very quickly.
     'ioflo_realtime': bool,
+
+    # Location for ioflo logs
     'ioflo_console_logdir': str,
+
+    # The port to bind to when bringing up a RAET daemon
     'raet_port': int,
     'raet_alt_port': int,
     'raet_mutable': bool,
@@ -271,17 +638,38 @@ VALID_OPTS = {
     'cluster_mode': bool,
     'cluster_masters': list,
     'sqlite_queue_dir': str,
+
     'queue_dirs': list,
+
+    # Instructs the minion to ping its master(s) ever n number of seconds. Used
+    # primarily as a mitigation technique against minion disconnects.
     'ping_interval': int,
+
+    # Instructs the salt CLI to print a summary of a minion reponses before returning
     'cli_summary': bool,
+
+    # The number of minions the master should allow to connect. Can have performance implications
+    # in large setups.
     'max_minions': int,
+
+
     'username': str,
     'password': str,
+
+    # Use zmq.SUSCRIBE to limit listening sockets to only process messages bound for them
     'zmq_filtering': bool,
+
+    # Connection caching. Can greatly speed up salt performance.
     'con_cache': bool,
     'rotate_aes_key': bool,
+
+    # Cache ZeroMQ connections. Can greatly improve salt performance.
     'cache_sreqs': bool,
+
+    # Can be set to override the python_shell=False default in the cmd module
     'cmd_safe': bool,
+
+    # Used strictly for performance testing in RAET.
     'dummy_publisher': bool,
 }
 
@@ -313,6 +701,7 @@ DEFAULT_MINION_OPTS = {
     'failhard': False,
     'autoload_dynamic_modules': True,
     'environment': None,
+    'pillarenv': None,
     'extension_modules': '',
     'state_top': 'top.sls',
     'startup_states': '',
@@ -364,7 +753,7 @@ DEFAULT_MINION_OPTS = {
     'autosign_timeout': 120,
     'multiprocessing': True,
     'mine_interval': 60,
-    'ipc_mode': 'ipc',
+    'ipc_mode': _DFLT_IPC_MODE,
     'ipv6': False,
     'file_buffer_size': 262144,
     'tcp_pub_port': 4510,
@@ -400,6 +789,8 @@ DEFAULT_MINION_OPTS = {
     'recon_max': 10000,
     'recon_default': 1000,
     'recon_randomize': True,
+    'syndic_log_file': os.path.join(salt.syspaths.LOGS_DIR, 'syndic'),
+    'syndic_pidfile': os.path.join(salt.syspaths.PIDFILE_DIR, 'salt-syndic.pid'),
     'random_reauth_delay': 10,
     'win_repo_cachefile': 'salt://win/repo/winrepo.p',
     'pidfile': os.path.join(salt.syspaths.PIDFILE_DIR, 'salt-minion.pid'),
@@ -411,7 +802,7 @@ DEFAULT_MINION_OPTS = {
     'modules_max_memory': -1,
     'grains_refresh_every': 0,
     'minion_id_caching': True,
-    'keysize': 4096,
+    'keysize': 2048,
     'transport': 'zeromq',
     'auth_timeout': 60,
     'auth_tries': 7,
@@ -436,6 +827,7 @@ DEFAULT_MINION_OPTS = {
     'username': None,
     'password': None,
     'zmq_filtering': False,
+    'zmq_monitor': False,
     'cache_sreqs': True,
     'cmd_safe': True,
 }
@@ -444,7 +836,6 @@ DEFAULT_MASTER_OPTS = {
     'interface': '0.0.0.0',
     'publish_port': '4505',
     'pub_hwm': 1000,
-    'rep_hwm': 50000,
     'auth_mode': 1,
     'user': 'root',
     'worker_threads': 5,
@@ -464,6 +855,7 @@ DEFAULT_MASTER_OPTS = {
     'pillar_roots': {
         'base': [salt.syspaths.BASE_PILLAR_ROOTS_DIR],
     },
+    'file_client': 'local',
     'gitfs_remotes': [],
     'gitfs_mountpoint': '',
     'gitfs_root': '',
@@ -501,6 +893,7 @@ DEFAULT_MASTER_OPTS = {
     'ext_pillar': [],
     'pillar_version': 2,
     'pillar_opts': False,
+    'pillar_safe_render_error': True,
     'pillar_source_merging_strategy': 'smart',
     'ping_on_rotate': False,
     'peer': {},
@@ -538,7 +931,12 @@ DEFAULT_MASTER_OPTS = {
     'master_job_cache': 'local_cache',
     'minion_data_cache': True,
     'enforce_mine_cache': False,
+    'ipc_mode': _DFLT_IPC_MODE,
     'ipv6': False,
+    'tcp_master_pub_port': 4512,
+    'tcp_master_pull_port': 4513,
+    'tcp_master_publish_pull': 4514,
+    'tcp_master_workers': 4515,
     'log_file': os.path.join(salt.syspaths.LOGS_DIR, 'master'),
     'log_level': None,
     'log_level_logfile': None,
@@ -583,12 +981,13 @@ DEFAULT_MASTER_OPTS = {
     'jinja_lstrip_blocks': False,
     'jinja_trim_blocks': False,
     'sign_pub_messages': False,
-    'keysize': 4096,
+    'keysize': 2048,
     'transport': 'zeromq',
     'enumerate_proxy_minions': False,
     'gather_job_timeout': 5,
     'syndic_event_forward_timeout': 0.5,
     'syndic_max_event_process_time': 0.5,
+    'syndic_jid_forward_cache_hwm': 100,
     'ssh_passwd': '',
     'ssh_port': '22',
     'ssh_sudo': False,
@@ -730,6 +1129,16 @@ def _validate_opts(opts):
                         err.format(key, val, type(val), VALID_OPTS[key])
                     )
 
+    # RAET on Windows uses 'win32file.CreateMailslot()' for IPC. Due to this,
+    # sock_dirs must start with '\\.\mailslot\' and not contain any colons.
+    # We don't expect the user to know this, so we will fix up their path for
+    # them if it isn't compliant.
+    if (salt.utils.is_windows() and opts.get('transport') == 'raet' and
+             'sock_dir' in opts and
+             not opts['sock_dir'].startswith('\\\\.\\mailslot\\')):
+        opts['sock_dir'] = (
+                '\\\\.\\mailslot\\' + opts['sock_dir'].replace(':', ''))
+
     for error in errors:
         log.warning(error)
     if errors:
@@ -775,7 +1184,7 @@ def _read_conf_file(path):
         if 'id' in conf_opts:
             conf_opts['id'] = str(conf_opts['id'])
         for key, value in six.iteritems(conf_opts.copy()):
-            if isinstance(value, text_type):
+            if isinstance(value, text_type) and six.PY2:
                 # We do not want unicode settings
                 conf_opts[key] = value.encode('utf-8')
         return conf_opts
@@ -932,7 +1341,7 @@ def insert_system_path(opts, paths):
 def minion_config(path,
                   env_var='SALT_MINION_CONFIG',
                   defaults=None,
-                  minion_id=False):
+                  cache_minion_id=False):
     '''
     Reads in the minion configuration file and sets up special options
 
@@ -967,7 +1376,7 @@ def minion_config(path,
     overrides.update(include_config(default_include, path, verbose=False))
     overrides.update(include_config(include, path, verbose=True))
 
-    opts = apply_minion_config(overrides, defaults, minion_id=minion_id)
+    opts = apply_minion_config(overrides, defaults, cache_minion_id=cache_minion_id)
     _validate_opts(opts)
     return opts
 
@@ -1004,6 +1413,7 @@ def syndic_config(master_config_path,
         'id': minion_opts['id'],
         'pki_dir': minion_opts['pki_dir'],
         'master': opts['syndic_master'],
+        'interface': master_opts['interface'],
         'master_port': int(
             opts.get(
                 # The user has explicitly defined the syndic master port
@@ -1025,6 +1435,7 @@ def syndic_config(master_config_path,
         'sock_dir': os.path.join(
             opts['cachedir'], opts.get('syndic_sock_dir', opts['sock_dir'])
         ),
+        'cachedir': master_opts['cachedir'],
     }
     opts.update(syndic_opts)
     # Prepend root_dir to other paths
@@ -1033,6 +1444,7 @@ def syndic_config(master_config_path,
         'autosign_file', 'autoreject_file', 'token_dir'
     ]
     for config_key in ('log_file', 'key_logfile'):
+        # If this is not a URI and instead a local path
         if urlparse(opts.get(config_key, '')).scheme == '':
             prepend_root_dirs.append(config_key)
     prepend_root_dir(opts, prepend_root_dirs)
@@ -1361,12 +1773,11 @@ def old_to_new(opts):
     for provider in providers:
 
         provider_config = {}
-        for opt in opts:
-            if not opt.startswith(provider):
-                continue
-            value = opts.pop(opt)
-            name = opt.split('.', 1)[1]
-            provider_config[name] = value
+        for opt, val in opts.items():
+            if provider in opt:
+                value = val
+                name = opt.split('.', 1)[1]
+                provider_config[name] = value
 
         lprovider = provider.lower()
         if provider_config:
@@ -1897,7 +2308,7 @@ def _cache_id(minion_id, cache_file):
         log.error('Could not cache minion ID: {0}'.format(exc))
 
 
-def get_id(opts, minion_id=False):
+def get_id(opts, cache_minion_id=False):
     '''
     Guess the id of the minion.
 
@@ -1933,13 +2344,14 @@ def get_id(opts, minion_id=False):
                 return name, False
         except (IOError, OSError):
             pass
-
-    log.debug('Guessing ID. The id can be explicitly in set {0}'
-              .format(os.path.join(salt.syspaths.CONFIG_DIR, 'minion')))
+    if '__role' in opts and opts.get('__role') == 'minion':
+        log.debug('Guessing ID. The id can be explicitly set in {0}'
+                  .format(os.path.join(salt.syspaths.CONFIG_DIR, 'minion')))
 
     newid = salt.utils.network.generate_minion_id()
-    log.info('Found minion id from generate_minion_id(): {0}'.format(newid))
-    if minion_id and opts.get('minion_id_caching', True):
+    if '__role' in opts and opts.get('__role') == 'minion':
+        log.info('Found minion id from generate_minion_id(): {0}'.format(newid))
+    if cache_minion_id and opts.get('minion_id_caching', True):
         _cache_id(newid, id_cache)
     is_ipv4 = newid.count('.') == 3 and not any(c.isalpha() for c in newid)
     return newid, is_ipv4
@@ -1947,7 +2359,7 @@ def get_id(opts, minion_id=False):
 
 def apply_minion_config(overrides=None,
                         defaults=None,
-                        minion_id=False):
+                        cache_minion_id=False):
     '''
     Returns minion configurations dict.
     '''
@@ -1967,7 +2379,7 @@ def apply_minion_config(overrides=None,
     if opts['id'] is None:
         opts['id'], using_ip_for_id = get_id(
                 opts,
-                minion_id=minion_id)
+                cache_minion_id=cache_minion_id)
 
     # it does not make sense to append a domain to an IP based id
     if not using_ip_for_id and 'append_domain' in opts:
@@ -2003,6 +2415,10 @@ def apply_minion_config(overrides=None,
             prepend_root_dirs.append(config_key)
 
     prepend_root_dir(opts, prepend_root_dirs)
+
+    # if there is no beacons option yet, add an empty beacons dict
+    if 'beacons' not in opts:
+        opts['beacons'] = {}
 
     # if there is no schedule option yet, add an empty scheduler
     if 'schedule' not in opts:
@@ -2073,13 +2489,14 @@ def apply_master_config(overrides=None, defaults=None):
         os.path.join(opts['cachedir'], 'extmods')
     )
     opts['token_dir'] = os.path.join(opts['cachedir'], 'tokens')
+    opts['syndic_dir'] = os.path.join(opts['cachedir'], 'syndics')
 
     using_ip_for_id = False
     append_master = False
     if opts.get('id') is None:
         opts['id'], using_ip_for_id = get_id(
                 opts,
-                minion_id=None)
+                cache_minion_id=None)
         append_master = True
 
     # it does not make sense to append a domain to an IP based id
@@ -2091,7 +2508,8 @@ def apply_master_config(overrides=None, defaults=None):
     # Prepend root_dir to other paths
     prepend_root_dirs = [
         'pki_dir', 'cachedir', 'pidfile', 'sock_dir', 'extension_modules',
-        'autosign_file', 'autoreject_file', 'token_dir', 'sqlite_queue_dir'
+        'autosign_file', 'autoreject_file', 'token_dir', 'syndic_dir',
+        'sqlite_queue_dir'
     ]
 
     # These can be set to syslog, so, not actual paths on the system
@@ -2181,7 +2599,7 @@ def client_config(path, env_var='SALT_CLIENT_CONFIG', defaults=None):
         client_config_dir = xdg_dir
         saltrc_config_file = 'saltrc'
     else:
-        client_config_dir = '~'
+        client_config_dir = os.path.expanduser('~')
         saltrc_config_file = '.saltrc'
 
     # Get the token file path from the provided defaults. If not found, specify

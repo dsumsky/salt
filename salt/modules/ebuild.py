@@ -52,10 +52,14 @@ def __virtual__():
 
 
 def _vartree():
+    import portage
+    portage = reload(portage)
     return portage.db[portage.root]['vartree']
 
 
 def _porttree():
+    import portage
+    portage = reload(portage)
     return portage.db[portage.root]['porttree']
 
 
@@ -244,7 +248,7 @@ def latest_version(*names, **kwargs):
 available_version = latest_version
 
 
-def _get_upgradable():
+def _get_upgradable(backtrack=3):
     '''
     Utility function to get upgradable packages
 
@@ -252,8 +256,18 @@ def _get_upgradable():
     { 'pkgname': '1.2.3-45', ... }
     '''
 
-    cmd = 'emerge --pretend --update --newuse --deep --ask n world'
-    call = __salt__['cmd.run_all'](cmd, output_loglevel='trace')
+    cmd = ['emerge',
+           '--ask', 'n',
+           '--backtrack', '{0}'.format(backtrack),
+           '--pretend',
+           '--update',
+           '--newuse',
+           '--deep',
+           '@world']
+
+    call = __salt__['cmd.run_all'](cmd,
+                                   output_loglevel='trace',
+                                   python_shell=False)
 
     if call['retcode'] != 0:
         comment = ''
@@ -286,9 +300,19 @@ def _get_upgradable():
     return ret
 
 
-def list_upgrades(refresh=True):
+def list_upgrades(refresh=True, backtrack=3):
     '''
     List all available package upgrades.
+
+    refresh
+        Whether or not to sync the portage tree before checking for upgrades.
+
+    backtrack
+        Specifies an integer number of times to backtrack if dependency
+        calculation fails due to a conflict or an unsatisfied dependency
+        (default: ´3´).
+
+        .. versionadded: Beryllium
 
     CLI Example:
 
@@ -298,7 +322,7 @@ def list_upgrades(refresh=True):
     '''
     if salt.utils.is_true(refresh):
         refresh_db()
-    return _get_upgradable()
+    return _get_upgradable(backtrack)
 
 
 def upgrade_available(name):
@@ -404,7 +428,7 @@ def refresh_db():
             cmd = 'emerge-delta-webrsync -q'
         return __salt__['cmd.retcode'](cmd, python_shell=False) == 0
     else:
-        if __salt__['cmd.retcode']('emerge --sync --ask n --quiet',
+        if __salt__['cmd.retcode']('emerge --ask n --quiet --sync',
                                    python_shell=False) == 0:
             return True
         # We fall back to "webrsync" if "rsync" fails for some reason
@@ -609,7 +633,7 @@ def install(name=None,
                 targets.append(target)
     else:
         targets = pkg_params
-    cmd = 'emerge --quiet {0} --ask n {1} {2}'.format(bin_opts, emerge_opts, ' '.join(targets))
+    cmd = 'emerge --ask n --quiet {0} {1} {2}'.format(bin_opts, emerge_opts, ' '.join(targets))
 
     old = list_pkgs()
     call = __salt__['cmd.run_all'](cmd,
@@ -669,7 +693,7 @@ def update(pkg, slot=None, fromrepo=None, refresh=False, binhost=None):
         bin_opts = ''
 
     old = list_pkgs()
-    cmd = 'emerge --update --newuse --oneshot --ask n --quiet {0} {1}'.format(bin_opts, full_atom)
+    cmd = 'emerge --ask n --quiet --update --newuse --oneshot {0} {1}'.format(bin_opts, full_atom)
     call = __salt__['cmd.run_all'](cmd,
                                    output_loglevel='trace',
                                    python_shell=False)
@@ -680,14 +704,21 @@ def update(pkg, slot=None, fromrepo=None, refresh=False, binhost=None):
     return salt.utils.compare_dicts(old, new)
 
 
-def upgrade(refresh=True, binhost=None):
+def upgrade(refresh=True, binhost=None, backtrack=3):
     '''
-    Run a full system upgrade (emerge --update world)
+    Run a full system upgrade (emerge -uDN @world)
 
     binhost
         has two options try and force.
         try - tells emerge to try and install the package from a configured binhost.
         force - forces emerge to install the package from a binhost otherwise it fails out.
+
+    backtrack
+        Specifies an integer number of times to backtrack if dependency
+        calculation fails due to a conflict or an unsatisfied dependency
+        (default: ´3´).
+
+        .. versionadded: Beryllium
 
     Return a dict containing the new package names and versions::
 
@@ -709,14 +740,24 @@ def upgrade(refresh=True, binhost=None):
         refresh_db()
 
     if binhost == 'try':
-        bin_opts = '-g'
+        bin_opts = '--getbinpkg'
     elif binhost == 'force':
-        bin_opts = '-G'
+        bin_opts = '--getbinpkgonly'
     else:
         bin_opts = ''
 
     old = list_pkgs()
-    cmd = 'emerge --update --newuse --deep --ask n --quiet {0} world'.format(bin_opts)
+    cmd = ['emerge',
+           '--ask', 'n',
+           '--quiet',
+           '--backtrack', '{0}'.format(backtrack),
+           '--update',
+           '--newuse',
+           '--deep']
+    if bin_opts:
+        cmd.append(bin_opts)
+    cmd.append('@world')
+
     call = __salt__['cmd.run_all'](cmd,
                                    output_loglevel='trace',
                                    python_shell=False)
@@ -783,7 +824,7 @@ def remove(name=None, slot=None, fromrepo=None, pkgs=None, **kwargs):
 
     if not targets:
         return {}
-    cmd = 'emerge --unmerge --quiet --quiet-unmerge-warn --ask n' \
+    cmd = 'emerge --ask n --quiet --unmerge --quiet-unmerge-warn ' \
           '{0}'.format(' '.join(targets))
     __salt__['cmd.run_all'](cmd,
                             output_loglevel='trace',
@@ -875,7 +916,7 @@ def depclean(name=None, slot=None, fromrepo=None, pkgs=None):
     else:
         targets = [x for x in pkg_params if x in old]
 
-    cmd = 'emerge --depclean --ask n --quiet {0}'.format(' '.join(targets))
+    cmd = 'emerge --ask n --quiet --depclean {0}'.format(' '.join(targets))
     __salt__['cmd.run_all'](cmd,
                             output_loglevel='trace',
                             python_shell=False)

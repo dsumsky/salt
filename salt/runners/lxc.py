@@ -125,18 +125,19 @@ def init(names, host=None, saltcloud_mode=False, quiet=False, **kwargs):
 
         salt-run lxc.init name host=minion_id [cpuset=cgroups_cpuset] \\
                 [cpushare=cgroups_cpushare] [memory=cgroups_memory] \\
-                [template=lxc template name] [clone=original name] \\
-                [nic=nic_profile] [profile=lxc_profile] \\
-                [nic_opts=nic_opts] [start=(true|false)] \\
-                [seed=(true|false)] [install=(true|false)] \\
-                [config=minion_config] [snapshot=(true|false)]
+                [template=lxc_template_name] [clone=original name] \\
+                [profile=lxc_profile] [network_proflile=network_profile] \\
+                [nic=network_profile] [nic_opts=nic_opts] \\
+                [start=(true|false)] [seed=(true|false)] \\
+                [install=(true|false)] [config=minion_config] \\
+                [snapshot=(true|false)]
 
     names
         Name of the containers, supports a single name or a comma delimited
         list of names.
 
     host
-        Minion to start the container on. Required.
+        Minion on which to initialize the container **(required)**
 
     saltcloud_mode
         init the container with the saltcloud opts format instead
@@ -149,7 +150,12 @@ def init(names, host=None, saltcloud_mode=False, quiet=False, **kwargs):
         cgroups cpu shares.
 
     memory
-        cgroups memory limit, in MB.
+        cgroups memory limit, in MB
+
+        .. versionchanged:: 2015.5.0
+            If no value is passed, no limit is set. In earlier Salt versions,
+            not passing this value causes a 1024MB memory limit to be set, and
+            it was necessary to pass ``memory=0`` to set no limit.
 
     template
         Name of LXC template on which to base this container
@@ -157,11 +163,17 @@ def init(names, host=None, saltcloud_mode=False, quiet=False, **kwargs):
     clone
         Clone this container from an existing container
 
-    nic
-        Network interfaces profile (defined in config or pillar).
-
     profile
         A LXC profile (defined in config or pillar).
+
+    network_profile
+        Network profile to use for the container
+
+        .. versionadded:: 2015.5.0
+
+    nic
+        .. deprecated:: 2015.5.0
+            Use ``network_profile`` instead
 
     nic_opts
         Extra options for network interfaces. E.g.:
@@ -218,11 +230,12 @@ def init(names, host=None, saltcloud_mode=False, quiet=False, **kwargs):
     explicit_auth = pub_key and priv_key
     approve_key = kw.get('approve_key', True)
     seeds = {}
+    seed_arg = kwargs.get('seed', True)
     if approve_key and not explicit_auth:
         skey = salt.key.Key(__opts__)
         all_minions = skey.all_keys().get('minions', [])
         for name in names:
-            seed = kwargs.get('seed', True)
+            seed = seed_arg
             if name in all_minions:
                 try:
                     if client.cmd(name, 'test.ping', timeout=20).get(name, None):
@@ -253,7 +266,7 @@ def init(names, host=None, saltcloud_mode=False, quiet=False, **kwargs):
                 expr_form='list', timeout=600).get(host, {})
         name = kw.pop('name', name)
         # be sure not to seed an already seeded host
-        kw['seed'] = seeds[name]
+        kw['seed'] = seeds.get(name, seed_arg)
         if not kw['seed']:
             kw.pop('seed_cmd', '')
         cmds.append(
@@ -277,7 +290,8 @@ def init(names, host=None, saltcloud_mode=False, quiet=False, **kwargs):
                 if not container.get('result', False):
                     error = container
             else:
-                error = 'Invalid return for {0}'.format(container_name)
+                error = 'Invalid return for {0}: {1} {2}'.format(
+                    container_name, container, sub_ret)
         else:
             error = sub_ret
             if not error:
@@ -327,7 +341,7 @@ def init(names, host=None, saltcloud_mode=False, quiet=False, **kwargs):
             ret['ping_status'] = False
             ret['result'] = False
 
-    # if no lxc detected as touched (either inited or verified
+    # if no lxc detected as touched (either inited or verified)
     # we result to False
     if not done:
         ret['result'] = False

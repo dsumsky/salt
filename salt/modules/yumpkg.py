@@ -26,10 +26,18 @@ from distutils.version import LooseVersion as _LooseVersion  # pylint: disable=n
 import salt.ext.six as six
 from salt.ext.six.moves import shlex_quote as _cmd_quote
 from salt.ext.six.moves import range  # pylint: disable=redefined-builtin
+
+try:
+    import yum
+    HAS_YUM = True
+except ImportError:
+    from salt.ext.six.moves import configparser
+    HAS_YUM = False
 # pylint: enable=import-error
 
 # Import salt libs
 import salt.utils
+import salt.utils.decorators as decorators
 from salt.exceptions import (
     CommandExecutionError, MinionError, SaltInvocationError
 )
@@ -112,7 +120,7 @@ def _repoquery_pkginfo(repoquery_args):
     Wrapper to call repoquery and parse out all the tuples
     '''
     ret = []
-    for line in _repoquery(repoquery_args):
+    for line in _repoquery(repoquery_args, ignore_stderr=True):
         pkginfo = _parse_pkginfo(line)
         if pkginfo is not None:
             ret.append(pkginfo)
@@ -135,7 +143,7 @@ def _check_repoquery():
             raise CommandExecutionError('Unable to install yum-utils')
 
 
-def _repoquery(repoquery_args, query_format=__QUERYFORMAT):
+def _repoquery(repoquery_args, query_format=__QUERYFORMAT, ignore_stderr=False):
     '''
     Runs a repoquery command and returns a list of namedtuples
     '''
@@ -146,7 +154,11 @@ def _repoquery(repoquery_args, query_format=__QUERYFORMAT):
     call = __salt__['cmd.run_all'](cmd, output_loglevel='trace')
     if call['retcode'] != 0:
         comment = ''
-        if 'stderr' in call:
+        # when checking for packages some yum modules return data via
+        # stderr that don't cause non-zero return codes.  A perfect
+        # example of this is when spacewalk is installed but not yet
+        # registered. We should ignore those when getting pkginfo.
+        if 'stderr' in call and not salt.utils.is_true(ignore_stderr):
             comment += call['stderr']
         if 'stdout' in call:
             comment += call['stdout']
@@ -181,11 +193,21 @@ def _get_repo_options(**kwargs):
     else:
         repo_arg = ''
         if disablerepo:
-            log.info('Disabling repo {0!r}'.format(disablerepo))
-            repo_arg += '--disablerepo={0!r}'.format(disablerepo)
+            if isinstance(disablerepo, list):
+                for repo_item in disablerepo:
+                    log.info('Disabling repo {0!r}'.format(repo_item))
+                    repo_arg += '--disablerepo={0!r} '.format(repo_item)
+            else:
+                log.info('Disabling repo {0!r}'.format(disablerepo))
+                repo_arg += '--disablerepo={0!r}'.format(disablerepo)
         if enablerepo:
-            log.info('Enabling repo {0!r}'.format(enablerepo))
-            repo_arg += '--enablerepo={0!r}'.format(enablerepo)
+            if isinstance(enablerepo, list):
+                for repo_item in enablerepo:
+                    log.info('Enabling repo {0!r}'.format(repo_item))
+                    repo_arg += '--enablerepo={0!r} '.format(repo_item)
+            else:
+                log.info('Enabling repo {0!r}'.format(enablerepo))
+                repo_arg += '--enablerepo={0!r}'.format(enablerepo)
     return repo_arg
 
 
@@ -231,7 +253,7 @@ def _rpm_pkginfo(name):
     Parses RPM metadata and returns a pkginfo namedtuple
     '''
     # REPOID is not a valid tag for the rpm command. Remove it and replace it
-    # with "none"
+    # with 'none'
     queryformat = __QUERYFORMAT.replace('%{REPOID}', 'none')
     output = __salt__['cmd.run_stdout'](
         'rpm -qp --queryformat {0!r} {1}'.format(_cmd_quote(queryformat), name),
@@ -251,6 +273,106 @@ def _rpm_installed(name):
         return pkg.name if pkg.name in list_pkgs() else None
     except AttributeError:
         return None
+
+
+def _get_yum_config():
+    '''
+    Returns a dict representing the yum config options and values.
+
+    We try to pull all of the yum config options into a standard dict object.
+    This is currently only used to get the reposdir settings, but could be used
+    for other things if needed.
+
+    If the yum python library is available, use that, which will give us
+    all of the options, including all of the defaults not specified in the
+    yum config.  Additionally, they will all be of the correct object type.
+
+    If the yum library is not available, we try to read the yum.conf
+    directly ourselves with a minimal set of "defaults".
+    '''
+    # in case of any non-fatal failures, these defaults will be used
+    conf = {
+        'reposdir': ['/etc/yum/repos.d', '/etc/yum.repos.d'],
+    }
+
+    if HAS_YUM:
+        try:
+            yb = yum.YumBase()
+            yb.preconf.init_plugins = False
+            for name, value in six.iteritems(yb.conf):
+                conf[name] = value
+        except (AttributeError, yum.Errors.ConfigError) as exc:
+            raise CommandExecutionError(
+                'Could not query yum config: {0}'.format(exc)
+            )
+    else:
+        # fall back to parsing the config ourselves
+        # Look for the config the same order yum does
+        fn = None
+        paths = ('/etc/yum/yum.conf', '/etc/yum.conf')
+        for path in paths:
+            if os.path.exists(path):
+                fn = path
+                break
+
+        if not fn:
+            raise CommandExecutionError(
+                'No suitable yum config file found in: {0}'.format(paths)
+            )
+
+        cp = configparser.ConfigParser()
+        try:
+            cp.read(fn)
+        except (IOError, OSError) as exc:
+            raise CommandExecutionError(
+                'Unable to read from {0}: {1}'.format(fn, exc)
+            )
+
+        if cp.has_section('main'):
+            for opt in cp.options('main'):
+                if opt in ('reposdir', 'commands', 'excludes'):
+                    # these options are expected to be lists
+                    conf[opt] = [x.strip() for x in cp.get('main', opt).split(',')]
+                else:
+                    conf[opt] = cp.get('main', opt)
+        else:
+            log.warning('Could not find [main] section in {0}, using internal defaults'.format(fn))
+
+    return conf
+
+
+def _get_yum_config_value(name):
+    '''
+    Look for a specific config variable and return its value
+    '''
+    conf = _get_yum_config()
+    if name in conf.keys():
+        return conf.get(name)
+    return None
+
+
+def _normalize_basedir(basedir=None):
+    '''
+    Takes a basedir argument as a string or a list.  If the string or list is empty,
+    then look up the default from the 'reposdir' option in the yum config.
+
+    Returns a list of directories.
+    '''
+    if basedir is None:
+        basedir = []
+
+    # if we are passed a string (for backward compatibility), convert to a list
+    if isinstance(basedir, six.string_types):
+        basedir = [x.strip() for x in basedir.split(',')]
+
+    # nothing specified, so use the reposdir option as the default
+    if not basedir:
+        basedir = _get_yum_config_value('reposdir')
+
+    if not isinstance(basedir, list) or not basedir:
+        raise SaltInvocationError('Could not determine any repo directories')
+
+    return basedir
 
 
 def normalize_name(name):
@@ -341,9 +463,14 @@ def latest_version(*names, **kwargs):
         refresh_db(_get_branch_option(**kwargs), repo_arg, exclude_arg)
 
     # Get updates for specified package(s)
-    updates = _repoquery_pkginfo(
-        '{0} {1} --pkgnarrow=available {2}'
-        .format(repo_arg, exclude_arg, ' '.join(names))
+    # Sort by version number (highest to lowest) for loop below
+    updates = sorted(
+        _repoquery_pkginfo(
+            '{0} {1} --pkgnarrow=available {2}'
+            .format(repo_arg, exclude_arg, ' '.join(names))
+        ),
+        key=lambda pkginfo: _LooseVersion(pkginfo.version),
+        reverse=True
     )
 
     for name in names:
@@ -662,102 +789,6 @@ def clean_metadata(**kwargs):
         salt '*' pkg.clean_metadata
     '''
     return refresh_db(_get_branch_option(**kwargs), _get_repo_options(**kwargs), _get_excludes_option(**kwargs))
-
-
-def group_install(name,
-                  skip=(),
-                  include=(),
-                  **kwargs):
-    '''
-    .. versionadded:: 2014.1.0
-
-    Install the passed package group(s). This is basically a wrapper around
-    pkg.install, which performs package group resolution for the user. This
-    function is currently considered experimental, and should be expected to
-    undergo changes.
-
-    name
-        Package group to install. To install more than one group, either use a
-        comma-separated list or pass the value as a python list.
-
-        CLI Examples:
-
-        .. code-block:: bash
-
-            salt '*' pkg.group_install 'Group 1'
-            salt '*' pkg.group_install 'Group 1,Group 2'
-            salt '*' pkg.group_install '["Group 1", "Group 2"]'
-
-    skip
-        The name(s), in a list, of any packages that would normally be
-        installed by the package group ("default" packages), which should not
-        be installed. Can be passed either as a comma-separated list or a
-        python list.
-
-        CLI Examples:
-
-        .. code-block:: bash
-
-            salt '*' pkg.group_install 'My Group' skip='foo,bar'
-            salt '*' pkg.group_install 'My Group' skip='["foo", "bar"]'
-
-    include
-        The name(s), in a list, of any packages which are included in a group,
-        which would not normally be installed ("optional" packages). Note that
-        this will not enforce group membership; if you include packages which
-        are not members of the specified groups, they will still be installed.
-        Can be passed either as a comma-separated list or a python list.
-
-        CLI Examples:
-
-        .. code-block:: bash
-
-            salt '*' pkg.group_install 'My Group' include='foo,bar'
-            salt '*' pkg.group_install 'My Group' include='["foo", "bar"]'
-
-    .. note::
-
-        Because this is essentially a wrapper around pkg.install, any argument
-        which can be passed to pkg.install may also be included here, and it
-        will be passed along wholesale.
-    '''
-    groups = name.split(',') if isinstance(name, six.string_types) else name
-
-    if not groups:
-        raise SaltInvocationError('no groups specified')
-    elif not isinstance(groups, list):
-        raise SaltInvocationError('\'groups\' must be a list')
-
-    # pylint: disable=maybe-no-member
-    if isinstance(skip, six.string_types):
-        skip = skip.split(',')
-    if not isinstance(skip, (list, tuple)):
-        raise SaltInvocationError('\'skip\' must be a list')
-
-    if isinstance(include, six.string_types):
-        include = include.split(',')
-    if not isinstance(include, (list, tuple)):
-        raise SaltInvocationError('\'include\' must be a list')
-    # pylint: enable=maybe-no-member
-
-    targets = []
-    for group in groups:
-        group_detail = group_info(group)
-        targets.extend(group_detail.get('mandatory packages', []))
-        targets.extend(
-            [pkg for pkg in group_detail.get('default packages', [])
-             if pkg not in skip]
-        )
-    if include:
-        targets.extend(include)
-
-    # Don't install packages that are already installed, install() isn't smart
-    # enough to make this distinction.
-    pkgs = [x for x in targets if x not in list_pkgs()]
-    if not pkgs:
-        return {}
-
-    return install(pkgs=pkgs, **kwargs)
 
 
 def install(name=None,
@@ -1407,21 +1438,27 @@ def group_list():
 
         salt '*' pkg.group_list
     '''
-    ret = {'installed': [], 'available': [], 'available languages': {}}
+    ret = {'installed': [], 'available': [], 'installed environments': [], 'available environments': [], 'available languages': {}}
     cmd = 'yum grouplist'
     out = __salt__['cmd.run_stdout'](cmd, output_loglevel='trace').splitlines()
     key = None
     for idx in range(len(out)):
-        if out[idx] == 'Installed Groups:':
+        if out[idx].lower() == 'installed groups:':
             key = 'installed'
             continue
-        elif out[idx] == 'Available Groups:':
+        elif out[idx].lower() == 'available groups:':
             key = 'available'
             continue
-        elif out[idx] == 'Available Language Groups:':
+        elif out[idx].lower() == 'installed environment groups:':
+            key = 'installed environments'
+            continue
+        elif out[idx].lower() == 'available environment groups:':
+            key = 'available environments'
+            continue
+        elif out[idx].lower() == 'available language groups:':
             key = 'available languages'
             continue
-        elif out[idx] == 'Done':
+        elif out[idx].lower() == 'done':
             continue
 
         if key is None:
@@ -1524,32 +1561,137 @@ def group_diff(name):
     return ret
 
 
-def list_repos(basedir='/etc/yum.repos.d'):
+def group_install(name,
+                  skip=(),
+                  include=(),
+                  **kwargs):
     '''
-    Lists all repos in <basedir> (default: /etc/yum.repos.d/).
+    .. versionadded:: 2014.1.0
+
+    Install the passed package group(s). This is basically a wrapper around
+    :py:func:`pkg.install <salt.modules.yumpkg.install>`, which performs
+    package group resolution for the user. This function is currently
+    considered experimental, and should be expected to undergo changes.
+
+    name
+        Package group to install. To install more than one group, either use a
+        comma-separated list or pass the value as a python list.
+
+        CLI Examples:
+
+        .. code-block:: bash
+
+            salt '*' pkg.group_install 'Group 1'
+            salt '*' pkg.group_install 'Group 1,Group 2'
+            salt '*' pkg.group_install '["Group 1", "Group 2"]'
+
+    skip
+        Packages that would normally be installed by the package group
+        ("default" packages), which should not be installed. Can be passed
+        either as a comma-separated list or a python list.
+
+        CLI Examples:
+
+        .. code-block:: bash
+
+            salt '*' pkg.group_install 'My Group' skip='foo,bar'
+            salt '*' pkg.group_install 'My Group' skip='["foo", "bar"]'
+
+    include
+        Packages which are included in a group, which would not normally be
+        installed by a ``yum groupinstall`` ("optional" packages). Note that
+        this will not enforce group membership; if you include packages which
+        are not members of the specified groups, they will still be installed.
+        Can be passed either as a comma-separated list or a python list.
+
+        CLI Examples:
+
+        .. code-block:: bash
+
+            salt '*' pkg.group_install 'My Group' include='foo,bar'
+            salt '*' pkg.group_install 'My Group' include='["foo", "bar"]'
+
+    .. note::
+
+        Because this is essentially a wrapper around pkg.install, any argument
+        which can be passed to pkg.install may also be included here, and it
+        will be passed along wholesale.
+    '''
+    groups = name.split(',') if isinstance(name, six.string_types) else name
+
+    if not groups:
+        raise SaltInvocationError('no groups specified')
+    elif not isinstance(groups, list):
+        raise SaltInvocationError('\'groups\' must be a list')
+
+    # pylint: disable=maybe-no-member
+    if isinstance(skip, six.string_types):
+        skip = skip.split(',')
+    if not isinstance(skip, (list, tuple)):
+        raise SaltInvocationError('\'skip\' must be a list')
+
+    if isinstance(include, six.string_types):
+        include = include.split(',')
+    if not isinstance(include, (list, tuple)):
+        raise SaltInvocationError('\'include\' must be a list')
+    # pylint: enable=maybe-no-member
+
+    targets = []
+    for group in groups:
+        group_detail = group_info(group)
+        targets.extend(group_detail.get('mandatory packages', []))
+        targets.extend(
+            [pkg for pkg in group_detail.get('default packages', [])
+             if pkg not in skip]
+        )
+    if include:
+        targets.extend(include)
+
+    # Don't install packages that are already installed, install() isn't smart
+    # enough to make this distinction.
+    pkgs = [x for x in targets if x not in list_pkgs()]
+    if not pkgs:
+        return {}
+
+    return install(pkgs=pkgs, **kwargs)
+
+groupinstall = group_install
+
+
+def list_repos(basedir=None):
+    '''
+    Lists all repos in <basedir> (default: all dirs in `reposdir` yum option).
 
     CLI Example:
 
     .. code-block:: bash
 
         salt '*' pkg.list_repos
+        salt '*' pkg.list_repos basedir=/path/to/dir
+        salt '*' pkg.list_repos basedir=/path/to/dir,/path/to/another/dir
     '''
+
+    basedirs = _normalize_basedir(basedir)
     repos = {}
-    for repofile in os.listdir(basedir):
-        repopath = '{0}/{1}'.format(basedir, repofile)
-        if not repofile.endswith('.repo'):
+    log.debug('Searching for repos in {0}'.format(basedirs))
+    for bdir in basedirs:
+        if not os.path.exists(bdir):
             continue
-        filerepos = _parse_repo_file(repopath)[1]
-        for reponame in six.iterkeys(filerepos):
-            repo = filerepos[reponame]
-            repo['file'] = repopath
-            repos[reponame] = repo
+        for repofile in os.listdir(bdir):
+            repopath = '{0}/{1}'.format(bdir, repofile)
+            if not repofile.endswith('.repo'):
+                continue
+            filerepos = _parse_repo_file(repopath)[1]
+            for reponame in filerepos.keys():
+                repo = filerepos[reponame]
+                repo['file'] = repopath
+                repos[reponame] = repo
     return repos
 
 
-def get_repo(repo, basedir='/etc/yum.repos.d', **kwargs):  # pylint: disable=W0613
+def get_repo(repo, basedir=None, **kwargs):  # pylint: disable=W0613
     '''
-    Display a repo from <basedir> (default basedir: ``/etc/yum.repos.d``).
+    Display a repo from <basedir> (default basedir: all dirs in `reposdir` yum option).
 
     CLI Examples:
 
@@ -1557,6 +1699,7 @@ def get_repo(repo, basedir='/etc/yum.repos.d', **kwargs):  # pylint: disable=W06
 
         salt '*' pkg.get_repo myrepo
         salt '*' pkg.get_repo myrepo basedir=/path/to/dir
+        salt '*' pkg.get_repo myrepo basedir=/path/to/dir,/path/to/another/dir
     '''
     repos = list_repos(basedir)
 
@@ -1573,9 +1716,9 @@ def get_repo(repo, basedir='/etc/yum.repos.d', **kwargs):  # pylint: disable=W06
     return {}
 
 
-def del_repo(repo, basedir='/etc/yum.repos.d', **kwargs):  # pylint: disable=W0613
+def del_repo(repo, basedir=None, **kwargs):  # pylint: disable=W0613
     '''
-    Delete a repo from <basedir> (default basedir: /etc/yum.repos.d).
+    Delete a repo from <basedir> (default basedir: all dirs in `reposdir` yum option).
 
     If the .repo file that the repo exists in does not contain any other repo
     configuration, the file itself will be deleted.
@@ -1586,12 +1729,15 @@ def del_repo(repo, basedir='/etc/yum.repos.d', **kwargs):  # pylint: disable=W06
 
         salt '*' pkg.del_repo myrepo
         salt '*' pkg.del_repo myrepo basedir=/path/to/dir
+        salt '*' pkg.del_repo myrepo basedir=/path/to/dir,/path/to/another/dir
     '''
-    repos = list_repos(basedir)
+    # this is so we know which dirs are searched for our error messages below
+    basedirs = _normalize_basedir(basedir)
+    repos = list_repos(basedirs)
 
     if repo not in repos:
         return 'Error: the {0} repo does not exist in {1}'.format(
-            repo, basedir)
+            repo, basedirs)
 
     # Find out what file the repo lives in
     repofile = ''
@@ -1691,18 +1837,27 @@ def mod_repo(repo, basedir=None, **kwargs):
 
     # Give the user the ability to change the basedir
     repos = {}
-    if basedir:
-        repos = list_repos(basedir)
-    else:
-        repos = list_repos()
-        basedir = '/etc/yum.repos.d'
+    basedirs = _normalize_basedir(basedir)
+    repos = list_repos(basedirs)
 
     repofile = ''
     header = ''
     filerepos = {}
     if repo not in repos:
-        # If the repo doesn't exist, create it in a new file
-        repofile = '{0}/{1}.repo'.format(basedir, repo)
+        # If the repo doesn't exist, create it in a new file in the first
+        # repo directory that exists
+        newdir = None
+        for d in basedirs:
+            if os.path.exists(d):
+                newdir = d
+                break
+        if not newdir:
+            raise SaltInvocationError(
+                'The repo does not exist and needs to be created, but none '
+                'of the following basedir directories exist: {0}'.format(basedirs)
+            )
+
+        repofile = '{0}/{1}.repo'.format(newdir, repo)
 
         if 'name' not in repo_opts:
             raise SaltInvocationError(
@@ -1792,9 +1947,10 @@ def _parse_repo_file(filename):
                     comps = line.strip().split('=')
                     repos[repo][comps[0].strip()] = '='.join(comps[1:])
                 except KeyError:
-                    log.error('Failed to parse line in {0}, '
-                              'offending line was "{1}"'.format(filename,
-                                                                line.rstrip()))
+                    log.error(
+                        'Failed to parse line in {0}, offending line was '
+                        '\'{1}\''.format(filename, line.rstrip())
+                    )
 
     return (header, repos)
 
@@ -1884,4 +2040,161 @@ def owner(*paths):
             ret[path] = ''
     if len(ret) == 1:
         return next(six.itervalues(ret))
+    return ret
+
+
+def modified(*packages, **flags):
+    '''
+    List the modified files that belong to a package. Not specifying any packages
+    will return a list of _all_ modified files on the system's RPM database.
+
+    .. versionadded:: 2015.5.0
+
+    Filtering by flags (True or False):
+
+    size
+        Include only files where size changed.
+
+    mode
+        Include only files which file's mode has been changed.
+
+    checksum
+        Include only files which MD5 checksum has been changed.
+
+    device
+        Include only files which major and minor numbers has been changed.
+
+    symlink
+        Include only files which are symbolic link contents.
+
+    owner
+        Include only files where owner has been changed.
+
+    group
+        Include only files where group has been changed.
+
+    time
+        Include only files where modification time of the file has been changed.
+
+    capabilities
+        Include only files where capabilities differ or not. Note: supported only on newer RPM versions.
+
+    CLI Examples:
+
+    .. code-block:: bash
+
+        salt '*' pkg.modified
+        salt '*' pkg.modified httpd
+        salt '*' pkg.modified httpd postfix
+        salt '*' pkg.modified httpd owner=True group=False
+    '''
+
+    return __salt__['lowpkg.modified'](*packages, **flags)
+
+
+@decorators.which('yumdownloader')
+def download(*packages):
+    '''
+    .. versionadded:: 2015.5.0
+
+    Download packages to the local disk. Requires ``yumdownloader`` from
+    ``yum-utils`` package.
+
+    .. note::
+
+        ``yum-utils`` will already be installed on the minion if the package
+        was installed from the Fedora / EPEL repositories.
+
+    CLI example:
+
+    .. code-block:: bash
+
+        salt '*' pkg.download httpd
+        salt '*' pkg.download httpd postfix
+    '''
+    if not packages:
+        raise SaltInvocationError('No packages were specified')
+
+    CACHE_DIR = '/var/cache/yum/packages'
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    cached_pkgs = os.listdir(CACHE_DIR)
+    to_purge = []
+    for pkg in packages:
+        to_purge.extend([os.path.join(CACHE_DIR, x)
+                         for x in cached_pkgs
+                         if x.startswith('{0}-'.format(pkg))])
+    for purge_target in set(to_purge):
+        log.debug('Removing cached package {0}'.format(purge_target))
+        try:
+            os.unlink(purge_target)
+        except OSError as exc:
+            log.error('Unable to remove {0}: {1}'.format(purge_target, exc))
+
+    __salt__['cmd.run'](
+        'yumdownloader -q {0} --destdir={1}'.format(
+            ' '.join(packages), CACHE_DIR
+        ),
+        output_loglevel='trace'
+    )
+    ret = {}
+    for dld_result in os.listdir(CACHE_DIR):
+        if not dld_result.endswith('.rpm'):
+            continue
+        pkg_name = None
+        pkg_file = None
+        for query_pkg in packages:
+            if dld_result.startswith('{0}-'.format(query_pkg)):
+                pkg_name = query_pkg
+                pkg_file = dld_result
+                break
+        if pkg_file is not None:
+            ret[pkg_name] = os.path.join(CACHE_DIR, pkg_file)
+
+    if not ret:
+        raise CommandExecutionError(
+            'Unable to download any of the following packages: {0}'
+            .format(', '.join(packages))
+        )
+
+    failed = [x for x in packages if x not in ret]
+    if failed:
+        ret['_error'] = ('The following package(s) failed to download: {0}'
+                         .format(', '.join(failed)))
+    return ret
+
+
+def diff(*paths):
+    '''
+    Return a formatted diff between current files and original in a package.
+    NOTE: this function includes all files (configuration and not), but does
+    not work on binary content.
+
+    :param path: Full path to the installed file
+    :return: Difference string or raises and exception if examined file is binary.
+
+    CLI example:
+
+    .. code-block:: bash
+
+        salt '*' pkg.diff /etc/apache2/httpd.conf /etc/sudoers
+    '''
+    ret = {}
+
+    pkg_to_paths = {}
+    for pth in paths:
+        pth_pkg = __salt__['lowpkg.owner'](pth)
+        if not pth_pkg:
+            ret[pth] = os.path.exists(pth) and 'Not managed' or 'N/A'
+        else:
+            if pkg_to_paths.get(pth_pkg) is None:
+                pkg_to_paths[pth_pkg] = []
+            pkg_to_paths[pth_pkg].append(pth)
+
+    if pkg_to_paths:
+        local_pkgs = __salt__['pkg.download'](*pkg_to_paths.keys())
+        for pkg, files in pkg_to_paths.items():
+            for path in files:
+                ret[path] = __salt__['lowpkg.diff'](local_pkgs[pkg]['path'], path) or 'Unchanged'
+
     return ret

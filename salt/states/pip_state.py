@@ -457,6 +457,24 @@ def installed(name,
         them to the ``pip`` library. It's functionality duplication and it's
         more error prone.
 
+
+    .. admonition:: Attention
+
+        Please set ``reload_modules: True`` to have the salt minion
+        import this module after installation.
+
+
+    Example:
+
+    .. code-block:: yaml
+
+        pyopenssl:
+            pip.installed:
+                - name: pyOpenSSL
+                - reload_modules: True
+                - exists_action: i
+
+
     .. _`virtualenv`: http://www.virtualenv.org/en/latest/
     '''
 
@@ -473,7 +491,7 @@ def installed(name,
     # prepro = lambda pkg: pkg if type(pkg) == str else \
     #     ' '.join((pkg.items()[0][0], pkg.items()[0][1].replace(',', ';')))
     # pkgs = ','.join([prepro(pkg) for pkg in pkgs])
-    prepro = lambda pkg: pkg if type(pkg) == str else \
+    prepro = lambda pkg: pkg if isinstance(pkg, str) else \
         ' '.join((six.iteritems(pkg)[0][0], six.iteritems(pkg)[0][1]))
     pkgs = [prepro(pkg) for pkg in pkgs]
 
@@ -519,9 +537,9 @@ def installed(name,
         name = repo
 
     # Get the packages parsed name and version from the pip library.
-    # This only is done when there is no requirements parameter.
+    # This only is done when there is no requirements or editable parameter.
     pkgs_details = []
-    if pkgs and not requirements:
+    if pkgs and not (requirements or editable):
         comments = []
         for pkg in iter(pkgs):
             out = _check_pkg_version_format(pkg)
@@ -719,7 +737,7 @@ def installed(name,
             comments = []
             if requirements:
                 comments.append('Unable to process requirements file '
-                                '{0}.'.format(requirements))
+                                '"{0}".'.format(requirements))
             if editable:
                 comments.append('Unable to install from VCS checkout'
                                 '{0}.'.format(editable))
@@ -802,7 +820,7 @@ def uptodate(name,
              cwd=None,
              use_vt=False):
     '''
-    .. versionadded:: Lithium
+    .. versionadded:: 2015.5.0
 
     Verify that the system is completely up to date.
 

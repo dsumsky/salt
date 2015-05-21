@@ -14,12 +14,14 @@ import socket
 
 # Import salt libs
 import salt.utils
+import salt.utils.decorators as decorators
 import salt.utils.network
 import salt.utils.validate.net
 from salt.exceptions import CommandExecutionError
 
 # Import 3rd-party libs
 import salt.ext.six as six
+import salt.ext.ipaddress as ipaddress
 from salt.ext.six.moves import range  # pylint: disable=import-error,no-name-in-module,redefined-builtin
 
 
@@ -78,7 +80,7 @@ def ping(host, timeout=False, return_boolean=False):
 
         salt '*' network.ping archlinux.org
 
-    .. versionadded:: Lithium
+    .. versionadded:: 2015.5.0
 
     Return a True or False instead of ping output.
 
@@ -304,7 +306,7 @@ def _netstat_route_linux():
     '''
     ret = []
     cmd = 'netstat -A inet -rn | tail -n+3'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         ret.append({
@@ -315,7 +317,7 @@ def _netstat_route_linux():
             'flags': comps[3],
             'interface': comps[7]})
     cmd = 'netstat -A inet6 -rn | tail -n+3'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         if len(comps) == 6:
@@ -345,7 +347,7 @@ def _netstat_route_freebsd():
     '''
     ret = []
     cmd = 'netstat -f inet -rn | tail -n+5'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         ret.append({
@@ -356,7 +358,7 @@ def _netstat_route_freebsd():
             'flags': comps[3],
             'interface': comps[5]})
     cmd = 'netstat -f inet6 -rn | tail -n+5'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         ret.append({
@@ -375,7 +377,7 @@ def _netstat_route_netbsd():
     '''
     ret = []
     cmd = 'netstat -f inet -rn | tail -n+5'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         ret.append({
@@ -386,7 +388,7 @@ def _netstat_route_netbsd():
             'flags': comps[3],
             'interface': comps[6]})
     cmd = 'netstat -f inet6 -rn | tail -n+5'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         ret.append({
@@ -405,7 +407,7 @@ def _netstat_route_openbsd():
     '''
     ret = []
     cmd = 'netstat -f inet -rn | tail -n+5'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         ret.append({
@@ -416,7 +418,7 @@ def _netstat_route_openbsd():
             'flags': comps[2],
             'interface': comps[7]})
     cmd = 'netstat -f inet6 -rn | tail -n+5'
-    out = __salt__['cmd.run'](cmd)
+    out = __salt__['cmd.run'](cmd, python_shell=True)
     for line in out.splitlines():
         comps = line.split()
         ret.append({
@@ -589,6 +591,7 @@ def dig(host):
     return __salt__['cmd.run'](cmd)
 
 
+@decorators.which('arp')
 def arp():
     '''
     Return the arp table from the minion
@@ -712,6 +715,21 @@ def ip_in_subnet(ip_addr, cidr):
     return salt.utils.network.ip_in_subnet(ip_addr, cidr)
 
 
+def calculate_subnet(ip_addr, netmask):
+    '''
+    Returns the CIDR of a subnet based on an IP address and network.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' network.calculate_subnet 172.17.0.5 255.255.255.240
+
+    .. versionadded:: Beryllium
+    '''
+    return salt.utils.network.calculate_subnet(ip_addr, netmask)
+
+
 def ip_addrs(interface=None, include_loopback=False, cidr=None):
     '''
     Returns a list of IPv4 addresses assigned to the host. 127.0.0.1 is
@@ -736,11 +754,13 @@ def ip_addrs(interface=None, include_loopback=False, cidr=None):
 ipaddrs = ip_addrs
 
 
-def ip_addrs6(interface=None, include_loopback=False):
+def ip_addrs6(interface=None, include_loopback=False, cidr=None):
     '''
     Returns a list of IPv6 addresses assigned to the host. ::1 is ignored,
     unless 'include_loopback=True' is indicated. If 'interface' is provided,
     then only IP addresses from that interface will be returned.
+    Providing a CIDR via 'cidr="2000::/3"' will return only the addresses
+    which are within that subnet.
 
     CLI Example:
 
@@ -748,8 +768,12 @@ def ip_addrs6(interface=None, include_loopback=False):
 
         salt '*' network.ip_addrs6
     '''
-    return salt.utils.network.ip_addrs6(interface=interface,
+    addrs = salt.utils.network.ip_addrs6(interface=interface,
                                         include_loopback=include_loopback)
+    if cidr:
+        return [i for i in addrs if salt.utils.network.ip_in_subnet(cidr, [i])]
+    else:
+        return addrs
 
 ipaddrs6 = ip_addrs6
 
@@ -777,12 +801,17 @@ def mod_hostname(hostname):
 
     .. code-block:: bash
 
-        salt '*' network.mod_hostname   master.saltstack.com
+        salt '*' network.mod_hostname master.saltstack.com
     '''
     if hostname is None:
         return False
 
-    hostname_cmd = salt.utils.which('hostname')
+    hostname_cmd = salt.utils.which('hostnamectl') or salt.utils.which('hostname')
+
+    if hostname_cmd.endswith('hostnamectl'):
+        __salt__['cmd.run']('{0} set-hostname {1}'.format(hostname_cmd, hostname))
+        return True
+
     # Grab the old hostname so we know which hostname to change and then
     # change the hostname using the hostname command
     o_hostname = __salt__['cmd.run']('{0} -f'.format(hostname_cmd))
@@ -925,12 +954,14 @@ def is_private(ip_addr):
     Check if the given IP address is a private address
 
     .. versionadded:: 2014.7.0
+    .. versionchanged:: Beryllium
+        IPv6 support
 
     CLI Example::
 
         salt '*' network.is_private 10.0.0.3
     '''
-    return salt.utils.network.IPv4Address(ip_addr).is_private
+    return ipaddress.ip_address(ip_addr).is_private
 
 
 def is_loopback(ip_addr):
@@ -938,17 +969,22 @@ def is_loopback(ip_addr):
     Check if the given IP address is a loopback address
 
     .. versionadded:: 2014.7.0
+    .. versionchanged:: Beryllium
+        IPv6 support
 
     CLI Example::
 
         salt '*' network.is_loopback 127.0.0.1
     '''
-    return salt.utils.network.IPv4Address(ip_addr).is_loopback
+    return ipaddress.ip_address(ip_addr).is_loopback
 
 
 def reverse_ip(ip_addr):
     '''
     Returns the reversed IP address
+
+    .. versionchanged:: Beryllium
+        IPv6 support
 
     CLI Example:
 
@@ -956,7 +992,7 @@ def reverse_ip(ip_addr):
 
         salt '*' network.reverse_ip 172.17.0.4
     '''
-    return salt.utils.network.IPv4Address(ip_addr).reverse_pointer
+    return ipaddress.ip_address(ip_addr).reverse_pointer
 
 
 def _get_bufsize_linux(iface):

@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import stat
+import errno
 import socket
 import logging
 
@@ -162,8 +163,11 @@ def verify_files(files, user):
     for fn_ in files:
         dirname = os.path.dirname(fn_)
         try:
-            if not os.path.isdir(dirname):
+            try:
                 os.makedirs(dirname)
+            except OSError as err:
+                if err.errno != errno.EEXIST:
+                    raise
             if not os.path.isfile(fn_):
                 with salt.utils.fopen(fn_, 'w+') as fp_:
                     fp_.write('')
@@ -181,7 +185,7 @@ def verify_files(files, user):
     return True
 
 
-def verify_env(dirs, user, permissive=False, pki_dir=''):
+def verify_env(dirs, user, permissive=False, pki_dir='', skip_extra=False):
     '''
     Verify that the named directories are in place and that the environment
     can shake the salt
@@ -277,8 +281,10 @@ def verify_env(dirs, user, permissive=False, pki_dir=''):
                         log.critical(msg)
                     else:
                         sys.stderr.write("CRITICAL: {0}\n".format(msg))
-    # Run the extra verification checks
-    zmq_version()
+
+    if skip_extra is False:
+        # Run the extra verification checks
+        zmq_version()
 
 
 def check_user(user):
@@ -294,11 +300,23 @@ def check_user(user):
         pwuser = pwd.getpwnam(user)
         try:
             if hasattr(os, 'initgroups'):
-                os.initgroups(user, pwuser.pw_gid)
+                os.initgroups(user, pwuser.pw_gid)  # pylint: disable=minimum-python-version
             else:
                 os.setgroups(salt.utils.get_gid_list(user, include_default=False))
             os.setgid(pwuser.pw_gid)
             os.setuid(pwuser.pw_uid)
+
+            # We could just reset the whole environment but let's just override
+            # the variables we can get from pwuser
+            if 'HOME' in os.environ:
+                os.environ['HOME'] = pwuser.pw_dir
+
+            if 'SHELL' in os.environ:
+                os.environ['SHELL'] = pwuser.pw_shell
+
+            for envvar in ('USER', 'LOGNAME'):
+                if envvar in os.environ:
+                    os.environ[envvar] = pwuser.pw_name
 
         except OSError:
             msg = 'Salt configured to run as user "{0}" but unable to switch.'

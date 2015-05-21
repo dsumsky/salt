@@ -103,6 +103,7 @@ import os
 import logging
 import socket
 import pprint
+import yaml
 
 # Import generic libcloud functions
 from salt.cloud.libcloudfuncs import *   # pylint: disable=W0614,W0401
@@ -799,14 +800,35 @@ def list_nodes(call=None, **kwargs):
         return {}
     for server in server_list:
         server_tmp = conn.server_show(server_list[server]['id'])[server]
+
+        private = []
+        public = []
+        if 'addresses' not in server_tmp:
+            server_tmp['addresses'] = {}
+        for network in server_tmp['addresses'].keys():
+            for address in server_tmp['addresses'][network]:
+                if salt.utils.cloud.is_public_ip(address.get('addr', '')):
+                    public.append(address['addr'])
+                elif ':' in address['addr']:
+                    public.append(address['addr'])
+                elif '.' in address['addr']:
+                    private.append(address['addr'])
+
+        if server_tmp['accessIPv4']:
+            if salt.utils.cloud.is_public_ip(server_tmp['accessIPv4']):
+                public.append(server_tmp['accessIPv4'])
+            else:
+                private.append(server_tmp['accessIPv4'])
+        if server_tmp['accessIPv6']:
+            public.append(server_tmp['accessIPv6'])
+
         ret[server] = {
             'id': server_tmp['id'],
             'image': server_tmp['image']['id'],
             'size': server_tmp['flavor']['id'],
             'state': server_tmp['state'],
-            'private_ips': [addrs['addr'] for addrs in
-                            server_tmp['addresses'].get('private', [])],
-            'public_ips': [server_tmp['accessIPv4'], server_tmp['accessIPv6']],
+            'private_ips': public,
+            'public_ips': private,
         }
     return ret
 
@@ -863,6 +885,10 @@ def volume_create(name, size=100, snapshot=None, voltype=None, **kwargs):
     return conn.volume_create(**create_kwargs)
 
 
+# Command parity with EC2 and Azure
+create_volume = volume_create
+
+
 def volume_delete(name, **kwargs):
     '''
     Delete block storage device
@@ -893,6 +919,73 @@ def volume_attach(name, server_name, device='/dev/xvdb', **kwargs):
         device,
         timeout=300
     )
+
+
+# Command parity with EC2 and Azure
+attach_volume = volume_attach
+
+
+def volume_create_attach(name, call=None, **kwargs):
+    '''
+    Create and attach volumes to created node
+    '''
+    if call == 'function':
+        raise SaltCloudSystemExit(
+            'The create_attach_volumes action must be called with '
+            '-a or --action.'
+        )
+
+    if type(kwargs['volumes']) is str:
+        volumes = yaml.safe_load(kwargs['volumes'])
+    else:
+        volumes = kwargs['volumes']
+
+    ret = []
+    for volume in volumes:
+        created = False
+
+        volume_dict = {
+            'name': volume['name'],
+        }
+        if 'volume_id' in volume:
+            volume_dict['volume_id'] = volume['volume_id']
+        elif 'snapshot' in volume:
+            volume_dict['snapshot'] = volume['snapshot']
+        else:
+            volume_dict['size'] = volume['size']
+
+            if 'type' in volume:
+                volume_dict['type'] = volume['type']
+            if 'iops' in volume:
+                volume_dict['iops'] = volume['iops']
+
+        if 'id' not in volume_dict:
+            created_volume = create_volume(**volume_dict)
+            created = True
+            volume_dict.update(created_volume)
+
+        attach = attach_volume(
+            name=volume['name'],
+            server_name=name,
+            device=volume.get('device', None),
+            call='action'
+        )
+
+        if attach:
+            msg = (
+                '{0} attached to {1} (aka {2})'.format(
+                    volume_dict['id'],
+                    name,
+                    volume_dict['name'],
+                )
+            )
+            log.info(msg)
+            ret.append(msg)
+    return ret
+
+
+# Command parity with EC2 and Azure
+create_attach_volumes = volume_create_attach
 
 
 def volume_list(**kwargs):

@@ -141,7 +141,7 @@ def returner(ret):
     '''
     es_ = _get_instance()
     _create_index(es_, __salt__['config.get']('elasticsearch:index'))
-    the_time = datetime.datetime.now().isoformat()
+    the_time = datetime.datetime.utcnow().isoformat()
     ret['@timestamp'] = the_time
     es_.index(index=__salt__['config.get']('elasticsearch:index'),
              doc_type='returner',
@@ -149,7 +149,7 @@ def returner(ret):
              )
 
 
-def prep_jid(nocache, passed_jid=None):  # pylint: disable=unused-argument
+def prep_jid(nocache=False, passed_jid=None):  # pylint: disable=unused-argument
     '''
     Do any work necessary to prepare a JID, including sending a custom id
     '''

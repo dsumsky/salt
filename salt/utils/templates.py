@@ -21,6 +21,7 @@ import jinja2.ext
 # Import salt libs
 import salt.utils
 import salt.utils.yamlencoding
+import salt.utils.locales
 from salt.exceptions import (
     SaltRenderError, CommandExecutionError, SaltInvocationError
 )
@@ -54,6 +55,15 @@ def wrap_tmpl_func(render_str):
         if context is None:
             context = {}
 
+        # Alias cmd.run to cmd.shell to make python_shell=True the default for
+        # templated calls
+        if 'salt' in kws:
+            if 'cmd.run' in kws['salt'] and 'cmd.shell' in kws['salt']:
+                kws['salt']['cmd.run'] = kws['salt']['cmd.shell']
+            if 'run' in kws['salt'].get('cmd', {}) \
+                    and 'shell' in kws['salt'].get('cmd', {}):
+                kws['salt']['cmd']['run'] = kws['salt']['cmd']['shell']
+
         # We want explicit context to overwrite the **kws
         kws.update(context)
         context = kws
@@ -66,6 +76,17 @@ def wrap_tmpl_func(render_str):
                 context['tplpath'] = tmplpath
                 if not tmplpath.lower().replace('\\', '/').endswith('/init.sls'):
                     slspath = os.path.dirname(slspath)
+                template = tmplpath.replace('\\', '/')
+                i = template.rfind(slspath.replace('.', '/'))
+                if i != -1:
+                    template = template[i:]
+                tpldir = os.path.dirname(template).replace('\\', '/')
+                tpldata = {
+                    'tplfile': template,
+                    'tpldir': tpldir,
+                    'tpldot': tpldir.replace('/', '.'),
+                }
+                context.update(tpldata)
             context['slsdotpath'] = slspath.replace('/', '.')
             context['slscolonpath'] = slspath.replace('/', ':')
             context['sls_path'] = slspath.replace('/', '_')
@@ -279,7 +300,7 @@ def render_jinja_tmpl(tmplstr, context, tmplpath=None):
             decoded_context[key] = value
             continue
 
-        decoded_context[key] = salt.utils.sdecode(value)
+        decoded_context[key] = salt.utils.locales.sdecode(value)
 
     try:
         template = jinja_env.from_string(tmplstr)

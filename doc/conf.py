@@ -24,6 +24,8 @@ class Mock(object):
     def __init__(self, *args, **kwargs):
         pass
 
+    __all__ = []
+
     def __call__(self, *args, **kwargs):
         ret = Mock()
         # If mocked function is used as a decorator, expose decorated function.
@@ -46,6 +48,7 @@ MOCK_MODULES = [
     'Crypto.Hash',
     'Crypto.PublicKey',
     'Crypto.Random',
+    'Crypto.Signature',
     'M2Crypto',
     'msgpack',
     'yaml',
@@ -54,6 +57,7 @@ MOCK_MODULES = [
     'yaml.scanner',
     'zmq',
     'zmq.eventloop',
+    'zmq.eventloop.ioloop',
 
     # third-party libs for cloud modules
     'libcloud',
@@ -78,7 +82,9 @@ MOCK_MODULES = [
     'tornado',
     'tornado.concurrent',
     'tornado.gen',
+    'tornado.httpclient',
     'tornado.httpserver',
+    'tornado.httputil',
     'tornado.ioloop',
     'tornado.web',
     'tornado.websocket',
@@ -89,22 +95,27 @@ MOCK_MODULES = [
     'ws4py.websocket',
 
     # modules, renderers, states, returners, et al
+    'ClusterShell',
+    'ClusterShell.NodeSet',
     'django',
     'libvirt',
     'MySQLdb',
     'MySQLdb.cursors',
+    'nagios_json',
     'psutil',
+    'psutil.version_info',
     'pycassa',
     'pymongo',
     'rabbitmq_server',
     'redis',
     'requests',
+    'requests.exceptions',
     'rpm',
     'rpmUtils',
     'rpmUtils.arch',
     'yum',
     'OpenSSL',
-    'zfs'
+    'zfs',
 ]
 
 for mod_name in MOCK_MODULES:
@@ -147,11 +158,11 @@ intersphinx_mapping = {
 # -- General Configuration -----------------------------------------------------
 
 project = 'Salt'
-copyright = '2014 SaltStack, Inc.'
+copyright = '2015 SaltStack, Inc.'
 
 version = salt.version.__version__
 #release = '.'.join(map(str, salt.version.__version_info__))
-release = '2014.7.1'
+release = '2015.5.0' # also update release versions in 'html_context'
 
 needs_sphinx = '1.3'
 
@@ -190,11 +201,12 @@ autosummary_generate = True
 
 # Define a substitution for linking to the latest release tarball
 rst_prolog = """\
+.. |current_release_doc| replace:: :doc:`/topics/releases/{release}`
 .. |saltrepo| replace:: https://github.com/saltstack/salt
 .. _`salt-users`: https://groups.google.com/forum/#!forum/salt-users
 .. _`salt-announce`: https://groups.google.com/forum/#!forum/salt-announce
 .. _`salt-packagers`: https://groups.google.com/forum/#!forum/salt-packagers
-"""
+""".format(release=release)
 
 # A shortcut for linking to tickets on the GitHub issue tracker
 extlinks = {
@@ -212,7 +224,7 @@ gettext_compact = False
 
 
 ### HTML options
-html_theme = 'saltstack'
+html_theme = 'saltstack2' #change to 'saltstack' to use previous theme
 html_theme_path = ['_themes']
 html_title = u''
 html_short_title = 'Salt'
@@ -263,6 +275,10 @@ html_context = {
     'github_base': 'https://github.com/saltstack/salt',
     'github_issues': 'https://github.com/saltstack/salt/issues',
     'github_downloads': 'https://github.com/saltstack/salt/downloads',
+    'latest_release_version': '2015.5.0',
+    'previous_release_version': '2014.7.6',
+    'previous_release_dir': '2014.7',
+    'build_type': 'latest', #latest, previous, develop
 }
 
 html_use_index = True
@@ -274,26 +290,24 @@ html_show_copyright = True
 ### Latex options
 
 latex_documents = [
-  ('contents','Salt-All.tex','Salt All-In-One Documentation','SaltStack, Inc.','manual'),
-  ('contents-1','Salt-1.tex','Salt 1/4 Documentation','SaltStack, Inc.','manual'),
-  ('contents-2','Salt-2.tex','Salt 2/4 Documentation', 'SaltStack, Inc.','manual'),
-  ('contents-3','Salt-3.tex','Salt 3/4 Documentation','SaltStack, Inc.','manual'),
-  ('contents-4','Salt-4.tex','Salt 4/4 Documentation','SaltStack, Inc.','manual'),
+  ('contents', 'Salt.tex', 'Salt Documentation', 'SaltStack, Inc.', 'manual'),
 ]
 
-latex_logo = '_static/salt-logo.pdf'
+latex_logo = '_static/salt-logo.png'
 
 latex_elements = {
     'inputenc': '',     # use XeTeX instead of the inputenc LaTeX package.
     'utf8extra': '',
     'preamble': '''
-
-\usepackage{fontspec}
-\setsansfont{DejaVu Sans}
-\setromanfont{DejaVu Serif}
-\setmonofont{DejaVu Sans Mono}
+    \usepackage{fontspec}
+    \setsansfont{Linux Biolinum O}
+    \setromanfont{Linux Libertine O}
+    \setmonofont{Source Code Pro}
 ''',
 }
+### Linux Biolinum, Linux Libertine: http://www.linuxlibertine.org/
+### Source Code Pro: https://github.com/adobe-fonts/source-code-pro/releases
+
 
 ### Linkcheck options
 linkcheck_ignore = [r'http://127.0.0.1',

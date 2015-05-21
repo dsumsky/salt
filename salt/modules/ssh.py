@@ -78,6 +78,35 @@ def _format_auth_line(key, enc, comment, options):
     return line
 
 
+def _expand_authorized_keys_path(path, user, home):
+    '''
+    Expand the AuthorizedKeysFile expression. Defined in man sshd_config(5)
+    '''
+    converted_path = ''
+    had_escape = False
+    for char in path:
+        if had_escape:
+            had_escape = False
+            if char == '%':
+                converted_path += '%'
+            elif char == 'u':
+                converted_path += user
+            elif char == 'h':
+                converted_path += home
+            else:
+                error = 'AuthorizedKeysFile path: unknown token character "%{0}"'.format(char)
+                raise CommandExecutionError(error)
+            continue
+        elif char == '%':
+            had_escape = True
+        else:
+            converted_path += char
+    if had_escape:
+        error = "AuthorizedKeysFile path: Last character can't be escape character"
+        raise CommandExecutionError(error)
+    return converted_path
+
+
 def _get_config_file(user, config):
     '''
     Get absolute path to a user's ssh_config.
@@ -85,8 +114,10 @@ def _get_config_file(user, config):
     uinfo = __salt__['user.info'](user)
     if not uinfo:
         raise CommandExecutionError('User {0!r} does not exist'.format(user))
+    home = uinfo['home']
     if not os.path.isabs(config):
-        config = os.path.join(uinfo['home'], config)
+        config = os.path.join(home, config)
+    config = _expand_authorized_keys_path(config, user, home)
     return config
 
 
@@ -231,7 +262,7 @@ def _get_known_hosts_file(config=None, user=None):
     return full
 
 
-def host_keys(keydir=None):
+def host_keys(keydir=None, private=True):
     '''
     Return the minion's host keys
 
@@ -240,6 +271,8 @@ def host_keys(keydir=None):
     .. code-block:: bash
 
         salt '*' ssh.host_keys
+        salt '*' ssh.host_keys keydir=/etc/ssh
+        salt '*' ssh.host_keys keydir=/etc/ssh private=False
     '''
     # TODO: support parsing sshd_config for the key directory
     if not keydir:
@@ -251,14 +284,25 @@ def host_keys(keydir=None):
     keys = {}
     for fn_ in os.listdir(keydir):
         if fn_.startswith('ssh_host_'):
+            if fn_.endswith('.pub') is False and private is False:
+                log.info('Skipping private key file {0} as private is set to False'.format(fn_))
+                continue
+
             top = fn_.split('.')
-            comps = fn_.split('_')
+            comps = top[0].split('_')
             kname = comps[2]
             if len(top) > 1:
                 kname += '.{0}'.format(top[1])
             try:
                 with salt.utils.fopen(os.path.join(keydir, fn_), 'r') as _fh:
-                    keys[kname] = _fh.readline().strip()
+                    # As of RFC 4716 "a key file is a text file, containing a sequence of lines",
+                    # although some SSH implementations (e.g. OpenSSH) manage their own format(s).
+                    # Please see #20708 for a discussion about how to handle SSH key files in the future
+                    keys[kname] = _fh.readline()
+                    # only read the whole file if it is not in the legacy 1.1 binary format
+                    if keys[kname] != "SSH PRIVATE KEY FILE FORMAT 1.1\n":
+                        keys[kname] += _fh.read()
+                    keys[kname] = keys[kname].strip()
             except (IOError, OSError):
                 keys[kname] = ''
     return keys
@@ -318,7 +362,7 @@ def check_key_file(user,
 
     .. code-block:: bash
 
-        salt '*' root salt://ssh/keyfile
+        salt '*' ssh.check_key_file root salt://ssh/keyfile
     '''
     if env is not None:
         salt.utils.warn_until(
@@ -706,7 +750,8 @@ def get_known_host(user, hostname, config=None):
         return full
 
     cmd = 'ssh-keygen -F "{0}" -f "{1}"'.format(hostname, full)
-    lines = __salt__['cmd.run'](cmd, python_shell=False).splitlines()
+    lines = __salt__['cmd.run'](cmd, ignore_retcode=True,
+                                python_shell=False).splitlines()
     known_hosts = list(_parse_openssh_output(lines))
     return known_hosts[0] if known_hosts else None
 
@@ -854,7 +899,7 @@ def set_known_host(user=None,
         check_required = True
 
     if not update_required and not check_required:
-        return {'status': 'exists', 'key': stored_host}
+        return {'status': 'exists', 'key': stored_host['key']}
 
     if not key:
         remote_host = recv_known_host(hostname,
@@ -871,8 +916,8 @@ def set_known_host(user=None,
                               'does not match one you have provided')}
 
         if check_required:
-            if remote_host == stored_host:
-                return {'status': 'uptodate', 'key': stored_host}
+            if remote_host['key'] == stored_host['key']:
+                return {'status': 'exists', 'key': stored_host['key']}
 
     # remove everything we had in the config so far
     rm_known_host(user, hostname, config=config)

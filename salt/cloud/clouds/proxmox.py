@@ -112,7 +112,7 @@ def _authenticate():
     full_url = 'https://{0}:8006/api2/json/access/ticket'.format(url)
 
     returned_data = requests.post(
-        full_url, verify=False, data=connect_data).json()
+        full_url, verify=True, data=connect_data).json()
 
     ticket = {'PVEAuthCookie': returned_data['data']['ticket']}
     csrf = str(returned_data['data']['CSRFPreventionToken'])
@@ -136,24 +136,24 @@ def query(conn_type, option, post_data=None):
 
     if conn_type == 'post':
         httpheaders['CSRFPreventionToken'] = csrf
-        response = requests.post(full_url, verify=False,
+        response = requests.post(full_url, verify=True,
                                  data=post_data,
                                  cookies=ticket,
                                  headers=httpheaders)
     elif conn_type == 'put':
         httpheaders['CSRFPreventionToken'] = csrf
-        response = requests.put(full_url, verify=False,
+        response = requests.put(full_url, verify=True,
                                 data=post_data,
                                 cookies=ticket,
                                 headers=httpheaders)
     elif conn_type == 'delete':
         httpheaders['CSRFPreventionToken'] = csrf
-        response = requests.delete(full_url, verify=False,
+        response = requests.delete(full_url, verify=True,
                                    data=post_data,
                                    cookies=ticket,
                                    headers=httpheaders)
     elif conn_type == 'get':
-        response = requests.get(full_url, verify=False,
+        response = requests.get(full_url, verify=True,
                                 cookies=ticket)
 
     response.raise_for_status()
@@ -416,7 +416,7 @@ def list_nodes(call=None):
         ret[vm_name] = {}
         ret[vm_name]['id'] = str(vm_details['vmid'])
         ret[vm_name]['image'] = str(vm_details['vmid'])
-        ret[vm_name]['size'] = str(vm_details['config']['disk'])
+        ret[vm_name]['size'] = str(vm_details['disk'])
         ret[vm_name]['state'] = str(vm_details['status'])
 
         # Figure out which is which to put it in the right column

@@ -15,6 +15,7 @@ except ImportError:
 
 # Import salt libs
 import salt.utils
+import salt.utils.locales
 
 # Set up logging
 log = logging.getLogger(__name__)
@@ -213,7 +214,10 @@ def set_computer_desc(desc):
 
         salt 'minion-id' system.set_computer_desc 'This computer belongs to Dave!'
     '''
-    cmd = ['net', 'config', 'server', u'/srvcomment:{0}'.format(salt.utils.sdecode(desc))]
+    cmd = ['net',
+           'config',
+           'server',
+           u'/srvcomment:{0}'.format(salt.utils.locales.sdecode(desc))]
     __salt__['cmd.run'](cmd, python_shell=False)
     return {'Computer Description': get_computer_desc()}
 
@@ -294,12 +298,12 @@ def join_domain(
         join_options = 1
     cmd = ('wmic /interactive:off ComputerSystem Where '
            'name="%computername%" call JoinDomainOrWorkgroup FJoinOptions={0} '
-           'Name={1} UserName={2} Password={3}'
+           'Name={1} UserName={2} Password="{3}"'
            ).format(
                join_options,
                _cmd_quote(domain),
                _cmd_quote(username),
-               _cmd_quote(password))
+               password)
     if account_ou:
         # contrary to RFC#2253, 2.1, 'wmic' requires a ; as a RDN separator
         # for the DN
@@ -311,6 +315,7 @@ def join_domain(
     if 'ReturnValue = 0;' in ret:
         return {'Domain': domain}
     return_values = {
+        2:    'Invalid OU or specifying OU is not supported',
         5:    'Access is denied',
         87:   'The parameter is incorrect',
         110:  'The system cannot open the specified object',

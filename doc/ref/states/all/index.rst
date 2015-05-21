@@ -22,15 +22,23 @@ Full list of builtin state modules
     aws_sqs
     blockdev
     boto_asg
+    boto_cfn
     boto_cloudwatch_alarm
+    boto_dynamodb
+    boto_ec2
     boto_elasticache
     boto_elb
+    boto_iam
     boto_iam_role
     boto_lc
+    boto_rds
     boto_route53
     boto_secgroup
     boto_sns
     boto_sqs
+    boto_vpc
+    bower
+    cabal
     chef
     cloud
     cmd
@@ -41,6 +49,7 @@ Full list of builtin state modules
     debconfmod
     disk
     dockerio
+    dockerng
     drac
     environ
     eselect
@@ -62,6 +71,7 @@ Full list of builtin state modules
     influxdb_database
     influxdb_user
     ini_manage
+    ipmi
     ipset
     iptables
     jboss7
@@ -84,6 +94,7 @@ Full list of builtin state modules
     module
     mongodb_database
     mongodb_user
+    monit
     mount
     mysql_database
     mysql_grants
@@ -95,6 +106,10 @@ Full list of builtin state modules
     ntp
     openstack_config
     pagerduty
+    pagerduty_escalation_policy
+    pagerduty_schedule
+    pagerduty_service
+    pagerduty_user
     pecl
     pip_state
     pkg
@@ -109,6 +124,7 @@ Full list of builtin state modules
     postgres_user
     powerpath
     process
+    pushover
     pyenv
     pyrax_queues
     quota
@@ -143,9 +159,11 @@ Full list of builtin state modules
     timezone
     tomcat
     tuned
+    uptime
     user
     vbox_guest
     virtualenv_mod
+    win_dacl
     win_dns_client
     win_firewall
     win_network
@@ -154,6 +172,7 @@ Full list of builtin state modules
     win_system
     win_update
     winrepo
+    x509
     xmpp
     zcbuildout
     zk_concurrency

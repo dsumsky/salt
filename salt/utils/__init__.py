@@ -30,19 +30,26 @@ import time
 import types
 import warnings
 import string
-import locale
-from calendar import month_abbr as months
 
 # Import 3rd-party libs
 import salt.ext.six as six
-# pylint: disable=import-error,redefined-builtin
+# pylint: disable=import-error
 from salt.ext.six.moves.urllib.parse import urlparse  # pylint: disable=no-name-in-module
+# pylint: disable=redefined-builtin
 from salt.ext.six.moves import range
 from salt.ext.six.moves import zip
 from salt.ext.six.moves import map
-# pylint: disable=import-error,redefined-builtin
+from stat import S_IMODE
+# pylint: enable=import-error,redefined-builtin
 
 # Try to load pwd, fallback to getpass if unsuccessful
+# Import 3rd-party libs
+try:
+    import Crypto.Random
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
+
 try:
     import pwd
 except ImportError:
@@ -94,6 +101,15 @@ try:
     HAS_SETPROCTITLE = True
 except ImportError:
     HAS_SETPROCTITLE = False
+
+try:
+    import ctypes
+    import ctypes.util
+    libc = ctypes.cdll.LoadLibrary(ctypes.util.find_library("c"))
+    res_init = libc.__res_init
+    HAS_RESINIT = True
+except (ImportError, OSError, AttributeError):
+    HAS_RESINIT = False
 
 # Import salt libs
 from salt.defaults import DEFAULT_TARGET_DELIM
@@ -257,6 +273,56 @@ def get_user():
         return getpass.getuser()
 
 
+def get_uid(user=None):
+    """
+    Get the uid for a given user name. If no user given,
+    the current euid will be returned. If the user
+    does not exist, None will be returned. On
+    systems which do not support pwd or os.geteuid
+    it will return None.
+    """
+    if pwd is None:
+        result = None
+    elif user is None:
+        try:
+            result = os.geteuid()
+        except AttributeError:
+            result = None
+    else:
+        try:
+            u_struct = pwd.getpwnam(user)
+        except KeyError:
+            result = None
+        else:
+            result = u_struct.pw_uid
+    return result
+
+
+def get_gid(group=None):
+    """
+    Get the gid for a given group name. If no group given,
+    the current egid will be returned. If the group
+    does not exist, None will be returned. On
+    systems which do not support grp or os.getegid
+    it will return None.
+    """
+    if grp is None:
+        result = None
+    elif group is None:
+        try:
+            result = os.getegid()
+        except AttributeError:
+            result = None
+    else:
+        try:
+            g_struct = grp.getgrnam(group)
+        except KeyError:
+            result = None
+        else:
+            result = g_struct.gr_gid
+    return result
+
+
 def get_specific_user():
     '''
     Get a user name for publishing. If you find the user is "root" attempt to be
@@ -271,6 +337,20 @@ def get_specific_user():
     return user
 
 
+def reinit_crypto():
+    '''
+    When a fork arrises, pycrypto needs to reinit
+    From its doc::
+
+        Caveat: For the random number generator to work correctly,
+        you must call Random.atfork() in both the parent and
+        child processes after using os.fork()
+
+    '''
+    if HAS_CRYPTO:
+        Crypto.Random.atfork()
+
+
 def daemonize(redirect_out=True):
     '''
     Daemonize a process
@@ -279,6 +359,7 @@ def daemonize(redirect_out=True):
         pid = os.fork()
         if pid > 0:
             # exit first parent
+            reinit_crypto()
             sys.exit(salt.defaults.exitcodes.EX_OK)
     except OSError as exc:
         log.error(
@@ -296,6 +377,7 @@ def daemonize(redirect_out=True):
     try:
         pid = os.fork()
         if pid > 0:
+            reinit_crypto()
             sys.exit(salt.defaults.exitcodes.EX_OK)
     except OSError as exc:
         log.error(
@@ -304,6 +386,8 @@ def daemonize(redirect_out=True):
             )
         )
         sys.exit(salt.defaults.exitcodes.EX_GENERIC)
+
+    reinit_crypto()
 
     # A normal daemonization redirects the process output to /dev/null.
     # Unfortunately when a python multiprocess is called the output is
@@ -357,8 +441,14 @@ def which(exe=None):
     '''
     Python clone of /usr/bin/which
     '''
+    def _is_executable_file_or_link(exe):
+        # check for os.X_OK doesn't suffice because directory may executable
+        return (os.access(exe, os.X_OK) and
+                (os.path.isfile(exe) or os.path.islink(exe)))
+
     if exe:
-        if os.access(exe, os.X_OK):
+        if _is_executable_file_or_link(exe):
+            # executable in cwd or fullpath
             return exe
 
         # default path based on busybox's default
@@ -398,7 +488,7 @@ def which(exe=None):
             )
         for path in search_path:
             full_path = os.path.join(path, exe)
-            if os.access(full_path, os.X_OK):
+            if _is_executable_file_or_link(full_path):
                 return full_path
             elif is_windows() and not _exe_has_ext():
                 # On Windows, check for any extensions in PATHEXT.
@@ -406,7 +496,7 @@ def which(exe=None):
                 for ext in ext_list:
                     # Windows filesystem is case insensitive so we
                     # safely rely on that behavior
-                    if os.access(full_path + ext, os.X_OK):
+                    if _is_executable_file_or_link(full_path + ext):
                         return full_path + ext
         log.trace(
             '{0!r} could not be found in the following search '
@@ -491,6 +581,9 @@ def dns_check(addr, safe=False, ipv6=False):
     '''
     error = False
     try:
+        # issue #21397: force glibc to re-read resolv.conf
+        if HAS_RESINIT:
+            res_init()
         hostnames = socket.getaddrinfo(
             addr, None, socket.AF_UNSPEC, socket.SOCK_STREAM
         )
@@ -772,7 +865,9 @@ def format_call(fun,
 
     aspec = salt.utils.args.get_function_argspec(fun)
 
-    args, kwargs = six.itervalues(arg_lookup(fun))
+    arg_data = arg_lookup(fun)
+    args = arg_data['args']
+    kwargs = arg_data['kwargs']
 
     # Since we WILL be changing the data dictionary, let's change a copy of it
     data = data.copy()
@@ -827,6 +922,17 @@ def format_call(fun,
             continue
         extra[key] = copy.deepcopy(value)
 
+    # We'll be showing errors to the users until Salt Carbon comes out, after
+    # which, errors will be raised instead.
+    warn_until(
+        'Carbon',
+        'It\'s time to start raising `SaltInvocationError` instead of '
+        'returning warnings',
+        # Let's not show the deprecation warning on the console, there's no
+        # need.
+        _dont_call_warnings=True
+    )
+
     if extra:
         # Found unexpected keyword arguments, raise an error to the user
         if len(extra) == 1:
@@ -840,7 +946,7 @@ def format_call(fun,
                 )
             )
         else:
-            msg = '{0} and {1!r} are invalid keyword arguments for {2}'.format(
+            msg = '{0} and {1!r} are invalid keyword arguments for {2!r}'.format(
                 ', '.join(['{0!r}'.format(e) for e in extra][:-1]),
                 list(extra.keys())[-1],
                 ret.get(
@@ -850,14 +956,20 @@ def format_call(fun,
                     '{0}.{1}'.format(fun.__module__, fun.__name__)
                 )
             )
-        raise SaltInvocationError(
+
+        # Return a warning to the user explaining what's going on
+        ret.setdefault('warnings', []).append(
             '{0}. If you were trying to pass additional data to be used '
             'in a template context, please populate \'context\' with '
-            '\'key: value\' pairs.{1}'.format(
+            '\'key: value\' pairs. Your approach will work until Salt '
+            'Carbon is out.{1}'.format(
                 msg,
                 '' if 'full' not in ret else ' Please update your state files.'
             )
         )
+
+        # Lets pack the current extra kwargs as template context
+        ret.setdefault('context', {}).update(extra)
     return ret
 
 
@@ -984,9 +1096,33 @@ def fopen(*args, **kwargs):
     survive into the new program after exec.
 
     NB! We still have small race condition between open and fcntl.
+
     '''
     # Remove lock from kwargs if present
     lock = kwargs.pop('lock', False)
+
+    if lock is True:
+        warn_until(
+            'Beryllium',
+            'The \'lock\' keyword argument is deprecated and will be '
+            'removed in Salt Beryllium. Please use '
+            '\'salt.utils.flopen()\' for file locking while calling '
+            '\'salt.utils.fopen()\'.'
+        )
+        return flopen(*args, **kwargs)
+
+    # ensure 'binary' mode is always used on windows
+    if is_windows():
+        if len(args) > 1:
+            args = list(args)
+            if 'b' not in args[1]:
+                args[1] += 'b'
+        elif kwargs.get('mode', None):
+            if 'b' not in kwargs['mode']:
+                kwargs['mode'] += 'b'
+        else:
+            # the default is to read
+            kwargs['mode'] = 'rb'
 
     fhandle = open(*args, **kwargs)
     if is_fcntl_available():
@@ -997,9 +1133,8 @@ def fopen(*args, **kwargs):
         except AttributeError:
             FD_CLOEXEC = 1                  # pylint: disable=C0103
         old_flags = fcntl.fcntl(fhandle.fileno(), fcntl.F_GETFD)
-        if lock and is_fcntl_available(check_sunos=True):
-            fcntl.flock(fhandle.fileno(), fcntl.LOCK_SH)
         fcntl.fcntl(fhandle.fileno(), fcntl.F_SETFD, old_flags | FD_CLOEXEC)
+
     return fhandle
 
 
@@ -1008,12 +1143,57 @@ def flopen(*args, **kwargs):
     '''
     Shortcut for fopen with lock and context manager
     '''
-    with fopen(*args, lock=True, **kwargs) as fp_:
+    with fopen(*args, **kwargs) as fhandle:
         try:
-            yield fp_
+            if is_fcntl_available(check_sunos=True):
+                fcntl.flock(fhandle.fileno(), fcntl.LOCK_SH)
+            yield fhandle
         finally:
             if is_fcntl_available(check_sunos=True):
-                fcntl.flock(fp_.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(fhandle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def fpopen(*args, **kwargs):
+    '''
+    Shortcut for fopen with extra uid, gid and mode options.
+
+    Supported optional Keyword Arguments:
+
+      mode: explicit mode to set. Mode is anything os.chmod
+            would accept as input for mode. Works only on unix/unix
+            like systems.
+
+      uid: the uid to set, if not set, or it is None or -1 no changes are
+           made. Same applies if the path is already owned by this
+           uid. Must be int. Works only on unix/unix like systems.
+
+      gid: the gid to set, if not set, or it is None or -1 no changes are
+           made. Same applies if the path is already owned by this
+           gid. Must be int. Works only on unix/unix like systems.
+
+    '''
+    # Remove uid, gid and mode from kwargs if present
+    uid = kwargs.pop('uid', -1)  # -1 means no change to current uid
+    gid = kwargs.pop('gid', -1)  # -1 means no change to current gid
+    mode = kwargs.pop('mode', None)
+    with fopen(*args, **kwargs) as fhandle:
+        path = args[0]
+        d_stat = os.stat(path)
+
+        if hasattr(os, 'chown'):
+            # if uid and gid are both -1 then go ahead with
+            # no changes at all
+            if (d_stat.st_uid != uid or d_stat.st_gid != gid) and \
+                    [i for i in (uid, gid) if i != -1]:
+                os.chown(path, uid, gid)
+
+        if mode is not None:
+            mode_part = S_IMODE(d_stat.st_mode)
+            if mode_part != mode:
+                os.chmod(path, (d_stat.st_mode ^ mode_part) | mode)
+
+        yield fhandle
 
 
 def expr_match(line, expr):
@@ -1046,7 +1226,7 @@ def check_whitelist_blacklist(value, whitelist=None, blacklist=None):
     if whitelist:
         try:
             for expr in whitelist:
-                if expr_match(expr, value):
+                if expr_match(value, expr):
                     in_whitelist = True
                     break
         except TypeError:
@@ -1058,7 +1238,7 @@ def check_whitelist_blacklist(value, whitelist=None, blacklist=None):
     if blacklist:
         try:
             for expr in blacklist:
-                if expr_match(expr, value):
+                if expr_match(value, expr):
                     in_blacklist = True
                     break
         except TypeError:
@@ -1103,6 +1283,42 @@ def subdict_match(data,
         else:
             return fnmatch.fnmatch(str(target).lower(), pattern.lower())
 
+    def _dict_match(target, pattern, regex_match=False, exact_match=False):
+        if pattern.startswith('*:'):
+            pattern = pattern[2:]
+
+        if pattern == '*':
+            # We are just checking that the key exists
+            return True
+        elif pattern in target:
+            # We might want to search for a key
+            return True
+        elif subdict_match(target,
+                         pattern,
+                         regex_match=regex_match,
+                         exact_match=exact_match):
+            return True
+        for key in target.keys():
+            if _match(key,
+                      pattern,
+                      regex_match=regex_match,
+                      exact_match=exact_match):
+                return True
+            if isinstance(target[key], dict):
+                if _dict_match(target[key],
+                               pattern,
+                               regex_match=regex_match,
+                               exact_match=exact_match):
+                    return True
+            elif isinstance(target[key], list):
+                for item in target[key]:
+                    if _match(item,
+                              pattern,
+                              regex_match=regex_match,
+                              exact_match=exact_match):
+                        return True
+        return False
+
     for idx in range(1, expr.count(delimiter) + 1):
         splits = expr.split(delimiter)
         key = delimiter.join(splits[:idx])
@@ -1113,20 +1329,20 @@ def subdict_match(data,
         if match == {}:
             continue
         if isinstance(match, dict):
-            if matchstr == '*':
-                # We are just checking that the key exists
+            if _dict_match(match,
+                           matchstr,
+                           regex_match=regex_match,
+                           exact_match=exact_match):
                 return True
             continue
         if isinstance(match, list):
             # We are matching a single component to a single list member
             for member in match:
                 if isinstance(member, dict):
-                    if matchstr.startswith('*:'):
-                        matchstr = matchstr[2:]
-                    if subdict_match(member,
-                                     matchstr,
-                                     regex_match=regex_match,
-                                     exact_match=exact_match):
+                    if _dict_match(member,
+                                   matchstr,
+                                   regex_match=regex_match,
+                                   exact_match=exact_match):
                         return True
                 if _match(member,
                           matchstr,
@@ -1217,14 +1433,15 @@ def mkstemp(*args, **kwargs):
 
 def clean_kwargs(**kwargs):
     '''
-    Clean out the __pub* keys from the kwargs dict passed into the execution
-    module functions. The __pub* keys are useful for tracking what was used to
-    invoke the function call, but they may not be desierable to have if
-    passing the kwargs forward wholesale.
+    Return a dict without any of the __pub* keys (or any other keys starting
+    with a dunder) from the kwargs dict passed into the execution module
+    functions. These keys are useful for tracking what was used to invoke
+    the function call, but they may not be desierable to have if passing the
+    kwargs forward wholesale.
     '''
     ret = {}
     for key, val in six.iteritems(kwargs):
-        if not key.startswith('__pub'):
+        if not key.startswith('__'):
             ret[key] = val
     return ret
 
@@ -1302,13 +1519,10 @@ def is_fcntl_available(check_sunos=False):
     Simple function to check if the `fcntl` module is available or not.
 
     If `check_sunos` is passed as `True` an additional check to see if host is
-    SunOS is also made. For additional information check commit:
-        http://goo.gl/159FF8
+    SunOS is also made. For additional information see: http://goo.gl/159FF8
     '''
-    if HAS_FCNTL is False:
+    if check_sunos and is_sunos():
         return False
-    if check_sunos is True:
-        return HAS_FCNTL and is_sunos()
     return HAS_FCNTL
 
 
@@ -1445,6 +1659,19 @@ def is_true(value=None):
         return bool(value)
 
 
+def exactly_n(l, n=1):
+    '''
+    Tests that exactly N items in an iterable are "truthy" (neither None,
+    False, nor 0).
+    '''
+    i = iter(l)
+    return all(any(i) for j in range(n)) and not any(i)
+
+
+def exactly_one(l):
+    return exactly_n(l)
+
+
 def rm_rf(path):
     '''
     Platform-independent recursive delete. Includes code from
@@ -1489,23 +1716,6 @@ def option(value, default='', opts=None, pillar=None):
         if out is not default:
             return out
     return default
-
-
-def valid_url(url, protos):
-    '''
-    Return true if the passed URL is in the list of accepted protos
-    '''
-    if urlparse(url).scheme in protos:
-        return True
-    return False
-
-
-def strip_proto(uri):
-    '''
-    Return a copy of the string with the protocol designation stripped, if one
-    was present.
-    '''
-    return re.sub('^[^:/]+://', '', uri)
 
 
 def parse_docstring(docstring):
@@ -2016,7 +2226,7 @@ def decode_list(data):
     '''
     rv = []
     for item in data:
-        if isinstance(item, six.text_type):
+        if isinstance(item, six.text_type) and six.PY2:
             item = item.encode('utf-8')
         elif isinstance(item, list):
             item = decode_list(item)
@@ -2032,9 +2242,9 @@ def decode_dict(data):
     '''
     rv = {}
     for key, value in six.iteritems(data):
-        if isinstance(key, six.text_type):
+        if isinstance(key, six.text_type) and six.PY2:
             key = key.encode('utf-8')
-        if isinstance(value, six.text_type):
+        if isinstance(value, six.text_type) and six.PY2:
             value = value.encode('utf-8')
         elif isinstance(value, list):
             value = decode_list(value)
@@ -2099,6 +2309,22 @@ def is_bin_str(data):
     return False
 
 
+def is_dictlist(data):
+    '''
+    Returns True if data is a list of one-element dicts (as found in many SLS
+    schemas), otherwise returns False
+    '''
+    if isinstance(data, list):
+        for element in data:
+            if isinstance(element, dict):
+                if len(element) != 1:
+                    return False
+            else:
+                return False
+        return True
+    return False
+
+
 def repack_dictlist(data):
     '''
     Takes a list of one-element dicts (as found in many SLS schemas) and
@@ -2148,14 +2374,17 @@ def get_group_list(user=None, include_default=True):
         # Try os.getgrouplist, available in python >= 3.3
         log.trace('Trying os.getgrouplist for {0!r}'.format(user))
         try:
-            group_names = list(os.getgrouplist(user, pwd.getpwnam(user).pw_gid))
+            group_names = [
+                grp.getgrgid(grpid).gr_name for grpid in
+                os.getgrouplist(user, pwd.getpwnam(user).pw_gid)
+            ]
         except Exception:
             pass
     else:
         # Try pysss.getgrouplist
         log.trace('Trying pysss.getgrouplist for {0!r}'.format(user))
         try:
-            import pysss
+            import pysss  # pylint: disable=import-error
             group_names = list(pysss.getgrouplist(user))
         except Exception:
             pass
@@ -2327,40 +2556,6 @@ def rand_string(size=32):
     return key.encode('base64').replace('\n', '')
 
 
-@real_memoize
-def get_encodings():
-    '''
-    return a list of string encodings to try
-    '''
-    encodings = []
-    loc = locale.getdefaultlocale()[-1]
-    if loc:
-        encodings.append(loc)
-    encodings.append(sys.getdefaultencoding())
-    encodings.extend(['utf-8', 'latin-1'])
-    return encodings
-
-
-def sdecode(string_):
-    '''
-    Since we don't know where a string is coming from and that string will
-    need to be safely decoded, this function will attempt to decode the string
-    until if has a working string that does not stack trace
-    '''
-    if not isinstance(string_, str):
-        return string_
-    encodings = get_encodings()
-    for encoding in encodings:
-        try:
-            decoded = string_.decode(encoding)
-            # Make sure unicode string ops work
-            u' ' + decoded  # pylint: disable=W0104
-            return decoded
-        except UnicodeDecodeError:
-            continue
-    return string_
-
-
 def relpath(path, start='.'):
     '''
     Work around Python bug #5117, which is not (and will not be) patched in
@@ -2388,3 +2583,20 @@ def relpath(path, start='.'):
         return os.path.join(*rel_list)
 
     return os.path.relpath(path, start=start)
+
+
+def human_size_to_bytes(human_size):
+    '''
+    Convert human-readable units to bytes
+    '''
+    size_exp_map = {'K': 1, 'M': 2, 'G': 3, 'T': 4, 'P': 5}
+    human_size_str = str(human_size)
+    match = re.match(r'^(\d+)([KMGTP])?$', human_size_str)
+    if not match:
+        raise ValueError(
+            'Size must be all digits, with an optional unit type '
+            '(K, M, G, T, or P)'
+        )
+    size_num = int(match.group(1))
+    unit_multiplier = 1024 ** size_exp_map.get(match.group(2), 0)
+    return size_num * unit_multiplier

@@ -46,6 +46,7 @@ else:
     import resource
 
 # Import salt libs
+from salt.utils import reinit_crypto
 from salt.ext.six import string_types
 from salt.log.setup import LOG_LEVELS
 
@@ -217,7 +218,12 @@ class Terminal(object):
             'Child Forked! PID: {0}  STDOUT_FD: {1}  STDERR_FD: '
             '{2}'.format(self.pid, self.child_fd, self.child_fde)
         )
-        log.debug('Terminal Command: {0}'.format(' '.join(self.args)))
+        terminal_command = ' '.join(self.args)
+        if 'decode("base64")' in terminal_command:
+            log.debug('VT: Salt-SSH SHIM Terminal Command executed. Logged to TRACE')
+            log.trace('Terminal Command: {0}'.format(terminal_command))
+        else:
+            log.debug('Terminal Command: {0}'.format(terminal_command))
         # <---- Spawn our terminal -------------------------------------------
 
         # ----- Setup Logging ----------------------------------------------->
@@ -481,6 +487,7 @@ class Terminal(object):
                 # Close parent FDs
                 os.close(stdout_parent_fd)
                 os.close(stderr_parent_fd)
+                reinit_crypto()
 
                 # ----- Make STDOUT the controlling PTY --------------------->
                 child_name = os.ttyname(stdout_child_fd)
@@ -523,13 +530,15 @@ class Terminal(object):
                     os.close(tty_fd)
 
                 # Verify we now have a controlling tty.
-                tty_fd = os.open('/dev/tty', os.O_WRONLY)
-                if tty_fd < 0:
-                    raise TerminalException(
-                        'Could not open controlling tty, /dev/tty'
-                    )
-                else:
-                    os.close(tty_fd)
+                if os.name != 'posix':
+                    # Only do this check in not BSD-like operating systems. BSD-like operating systems breaks at this point
+                    tty_fd = os.open('/dev/tty', os.O_WRONLY)
+                    if tty_fd < 0:
+                        raise TerminalException(
+                            'Could not open controlling tty, /dev/tty'
+                        )
+                    else:
+                        os.close(tty_fd)
                 # <---- Make STDOUT the controlling PTY ----------------------
 
                 # ----- Duplicate Descriptors ------------------------------->
@@ -539,6 +548,7 @@ class Terminal(object):
                 # <---- Duplicate Descriptors --------------------------------
             else:
                 # Parent. Close Child PTY's
+                reinit_crypto()
                 os.close(stdout_child_fd)
                 os.close(stderr_child_fd)
 

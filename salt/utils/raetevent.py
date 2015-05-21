@@ -54,7 +54,7 @@ class RAETEvent(object):
         Prepare the stack objects
         '''
         if not self.stack:
-            if transport.jobber_stack:
+            if hasattr(transport, 'jobber_stack') and transport.jobber_stack:
                 self.stack = transport.jobber_stack
             else:
                 self.stack = transport.jobber_stack = self._setup_stack(ryn=self.ryn)
@@ -101,7 +101,7 @@ class RAETEvent(object):
                 name=name,
                 lanename=lanename,
                 sockdirpath=self.sock_dir)
-        stack.Pk = raeting.packKinds.pack
+        stack.Pk = raeting.PackKind.pack.value
         stack.addRemote(RemoteYard(stack=stack,
                                    lanename=lanename,
                                    name=ryn,

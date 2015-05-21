@@ -26,8 +26,13 @@ import copy
 import time
 import json
 import pprint
-import requests
 import logging
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 # Import salt cloud libs
 import salt.utils.cloud
@@ -54,6 +59,9 @@ def __virtual__():
     '''
     Check for DigitalOcean configurations
     '''
+    if not HAS_REQUESTS:
+        return False
+
     if get_configured_provider() is False:
         return False
 
@@ -115,7 +123,10 @@ def avail_images(call=None):
                 ret[image['id']][item] = str(image[item])
 
         page += 1
-        fetch = 'next' in items['links']['pages']
+        try:
+            fetch = 'next' in items['links']['pages']
+        except KeyError:
+            fetch = False
 
     return ret
 
@@ -164,7 +175,11 @@ def list_nodes(call=None):
                 'state': str(node['status']),
             }
         page += 1
-        fetch = 'next' in items['links']['pages']
+        try:
+            fetch = 'next' in items['links']['pages']
+        except KeyError:
+            fetch = False
+
     return ret
 
 
@@ -191,7 +206,10 @@ def list_nodes_full(call=None, forOutput=True):
                     value = str(value)
                 ret[node['name']][item] = value
         page += 1
-        fetch = 'next' in items['links']['pages']
+        try:
+            fetch = 'next' in items['links']['pages']
+        except KeyError:
+            fetch = False
     return ret
 
 
@@ -578,7 +596,7 @@ def query(method='droplets', droplet_id=None, command=None, args=None, http_meth
             'An error occurred while querying DigitalOcean. HTTP Code: {0}  '
             'Error: {1!r}'.format(
                 request.status_code,
-                #request.read()
+                # request.read()
                 request.text
             )
         )
@@ -691,6 +709,53 @@ def show_keypair(kwargs=None, call=None):
     details = query(method='account/keys', command=keyid)
 
     return details
+
+
+def create_key(kwargs=None, call=None):
+    '''
+    Upload a public key
+    '''
+    if call != 'function':
+        log.error(
+            'The create_key function must be called with -f or --function.'
+        )
+        return False
+
+    try:
+        result = query(
+            method='account',
+            command='keys',
+            args={'name': kwargs['name'], 'public_key': kwargs['public_key']},
+            http_method='post'
+        )
+    except KeyError:
+        log.info('`name` and `public_key` arguments must be specified')
+        return False
+
+    return result
+
+
+def remove_key(kwargs=None, call=None):
+    '''
+    Delete public key
+    '''
+    if call != 'function':
+        log.error(
+            'The create_key function must be called with -f or --function.'
+        )
+        return False
+
+    try:
+        result = query(
+            method='account',
+            command='keys/' + kwargs['id'],
+            http_method='delete'
+        )
+    except KeyError:
+        log.info('`id` argument must be specified')
+        return False
+
+    return result
 
 
 def get_keyid(keyname):

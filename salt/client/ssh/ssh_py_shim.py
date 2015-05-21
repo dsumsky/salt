@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# pylint: disable=W9903
 '''
 This is a shim that handles checking and updating salt thin and
 then invoking thin.
@@ -36,7 +36,7 @@ ARGS = None
 # The below line is where OPTIONS can be redefined with internal options
 # (rather than cli arguments) when the shim is bundled by
 # client.ssh.Single._cmd_str()
-# pylint: disable=block-comment-should-start-with-'# '
+# pylint: disable=block-comment-should-start-with-cardinal-space
 #%%OPTS
 
 

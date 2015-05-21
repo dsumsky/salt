@@ -54,10 +54,27 @@ all interfaces are ignored unless specified.
         - clonenum_start: 10
         - mtu: 9000
 
-    .. note::
+    eth1.0-range0:
+      network.managed:
+        - type: eth
+        - ipaddr_start: 192.168.1.1
+        - ipaddr_end: 192.168.1.10
+        - clonenum_start: 10
+        - vlan: True
+        - mtu: 9000
 
-        add support for ranged interfaces (bond and eth) for redhat system,
-        currently not support vlan and type must be eth.
+    bond0.1-range0:
+      network.managed:
+        - type: eth
+        - ipaddr_start: 192.168.1.1
+        - ipaddr_end: 192.168.1.10
+        - clonenum_start: 10
+        - vlan: True
+        - mtu: 9000
+
+    .. note::
+        add support of ranged interfaces (vlan, bond and eth) for redhat system,
+        Important:type must be eth.
 
     routes:
       network.routes:
@@ -74,11 +91,13 @@ all interfaces are ignored unless specified.
 
     eth2:
       network.managed:
+        - enabled: True
         - type: slave
         - master: bond0
 
     eth3:
       network.managed:
+        - enabled: True
         - type: slave
         - master: bond0
 
@@ -94,18 +113,17 @@ all interfaces are ignored unless specified.
         - type: bond
         - ipaddr: 10.1.0.1
         - netmask: 255.255.255.0
+        - mode: active-backup
+        - proto: static
         - dns:
           - 8.8.8.8
           - 8.8.4.4
         - ipv6:
         - enabled: False
-        - use_in:
-          - network: eth2
-          - network: eth3
+        - slaves: eth2 eth3
         - require:
           - network: eth2
           - network: eth3
-        - mode: 802.3ad
         - miimon: 100
         - arp_interval: 250
         - downdelay: 200
@@ -190,7 +208,7 @@ all interfaces are ignored unless specified.
     .. note::
         Apply changes to hostname immediately.
 
-    .. versionadded:: Lithium
+    .. versionadded:: 2015.5.0
 
 .. note::
 
@@ -268,8 +286,7 @@ def managed(name, type, enabled=True, **kwargs):
                 diff = difflib.unified_diff(old, new, lineterm='')
                 ret['result'] = None
                 ret['comment'] = 'Interface {0} is set to be ' \
-                                 'updated.'.format(name)
-                ret['changes']['interface'] = '\n'.join(diff)
+                                 'updated:\n{1}'.format(name, '\n'.join(diff))
         else:
             if not old and new:
                 ret['comment'] = 'Interface {0} ' \
@@ -306,8 +323,7 @@ def managed(name, type, enabled=True, **kwargs):
                     diff = difflib.unified_diff(old, new, lineterm='')
                     ret['result'] = None
                     ret['comment'] = 'Bond interface {0} is set to be ' \
-                                     'updated.'.format(name)
-                    ret['changes']['bond'] = '\n'.join(diff)
+                                     'updated:\n{1}'.format(name, '\n'.join(diff))
             else:
                 if not old and new:
                     ret['comment'] = 'Bond interface {0} ' \
@@ -418,8 +434,8 @@ def routes(name, **kwargs):
             elif old != new:
                 diff = difflib.unified_diff(old, new, lineterm='')
                 ret['result'] = None
-                ret['comment'] = 'Interface {0} routes are set to be updated.'.format(name)
-                ret['changes']['network_routes'] = '\n'.join(diff)
+                ret['comment'] = 'Interface {0} routes are set to be ' \
+                                 'updated:\n{1}'.format(name, '\n'.join(diff))
                 return ret
         if not old and new:
             apply_routes = True
@@ -480,8 +496,8 @@ def system(name, **kwargs):
             elif old != new:
                 diff = difflib.unified_diff(old, new, lineterm='')
                 ret['result'] = None
-                ret['comment'] = 'Global network settings are set to be updated.'
-                ret['changes']['network_settings'] = '\n'.join(diff)
+                ret['comment'] = 'Global network settings are set to be ' \
+                                 'updated:\n{0}'.format('\n'.join(diff))
                 return ret
         if not old and new:
             apply_net_settings = True

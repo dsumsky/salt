@@ -18,6 +18,13 @@ import salt.minion
 
 # Import 3rd-party libs
 import salt.ext.six as six
+from salt.exceptions import SaltClientError
+
+try:
+    import dateutil.parser as dateutil_parser
+    DATEUTIL_SUPPORT = True
+except ImportError:
+    DATEUTIL_SUPPORT = False
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +42,12 @@ def active(outputter=None, display_progress=False):
     '''
     ret = {}
     client = salt.client.get_local_client(__opts__['conf_file'])
-    active_ = client.cmd('*', 'saltutil.running', timeout=__opts__['timeout'])
+    try:
+        active_ = client.cmd('*', 'saltutil.running', timeout=__opts__['timeout'])
+    except SaltClientError as client_error:
+        print(client_error)
+        return ret
+
     if display_progress:
         __jid_event__.fire_event({
             'message': 'Attempting to contact minions: {0}'.format(list(active_.keys()))
@@ -61,6 +73,12 @@ def active(outputter=None, display_progress=False):
                 ret[jid]['Returned'].append(minion)
 
     if outputter:
+        salt.utils.warn_until(
+            'Boron',
+            'The \'outputter\' argument to the jobs.active runner '
+            'has been deprecated. Please specify an outputter using --out. '
+            'See the output of \'salt-run -h\' for more information.'
+        )
         return {'outputter': outputter, 'data': ret}
     else:
         return ret
@@ -84,15 +102,10 @@ def lookup_jid(jid,
         When set to `True`, adds the minions that did not return from the command.
         Default: `False`.
 
-    outputter
-        The outputter to use. Default: `None`.
-
-        .. versionadded:: Lithium
-
     display_progress
         Displays progress events when set to `True`. Default: `False`.
 
-        .. versionadded:: Lithium
+        .. versionadded:: 2015.5.0
 
     CLI Example:
 
@@ -111,6 +124,7 @@ def lookup_jid(jid,
         data = mminion.returners['{0}.get_jid'.format(returner)](jid)
     except TypeError:
         return 'Requested returner could not be loaded. No JIDs could be retrieved.'
+
     for minion in data:
         if display_progress:
             __jid_event__.fire_event({'message': minion}, 'progress')
@@ -119,11 +133,31 @@ def lookup_jid(jid,
         else:
             ret[minion] = data[minion].get('return')
     if missing:
+        load = mminion.returners['{0}.get_load'.format(returner)](jid)
         ckminions = salt.utils.minions.CkMinions(__opts__)
-        exp = ckminions.check_minions(data['tgt'], data['tgt_type'])
+        exp = ckminions.check_minions(load['tgt'], load['tgt_type'])
         for minion_id in exp:
             if minion_id not in data:
                 ret[minion_id] = 'Minion did not return'
+
+    # Once we remove the outputter argument in a couple releases, we still
+    # need to check to see if the 'out' key is present and use it to specify
+    # the correct outputter, so we get highstate output for highstate runs.
+    if outputter is None:
+        try:
+            # Check if the return data has an 'out' key. We'll use that as the
+            # outputter in the absence of one being passed on the CLI.
+            outputter = data[next(iter(data))].get('out')
+        except (StopIteration, AttributeError):
+            outputter = None
+    else:
+        salt.utils.warn_until(
+            'Boron',
+            'The \'outputter\' argument to the jobs.lookup_jid runner '
+            'has been deprecated. Please specify an outputter using --out. '
+            'See the output of \'salt-run -h\' for more information.'
+        )
+
     if outputter:
         return {'outputter': outputter, 'data': ret}
     else:
@@ -148,6 +182,12 @@ def list_job(jid, ext_source=None, outputter=None):
     ret.update(_format_jid_instance(jid, job))
     ret['Result'] = mminion.returners['{0}.get_jid'.format(returner)](jid)
     if outputter:
+        salt.utils.warn_until(
+            'Boron',
+            'The \'outputter\' argument to the jobs.list_job runner '
+            'has been deprecated. Please specify an outputter using --out. '
+            'See the output of \'salt-run -h\' for more information.'
+        )
         return {'outputter': outputter, 'data': ret}
     else:
         return ret
@@ -158,66 +198,113 @@ def list_jobs(ext_source=None,
               search_metadata=None,
               search_function=None,
               search_target=None,
+              start_time=None,
+              end_time=None,
               display_progress=False):
     '''
     List all detectable jobs and associated functions
+
+    ext_source
+        The external job cache to use. Default: `None`.
+
+    search_metadata
+        Search the metadata of a job for the provided string of dictionary.
+        Default: 'None'.
+
+    search_function
+        Search the function of a job for the provided string.
+        Default: 'None'.
+
+    search_target
+        Search the target of a job for the provided minion name.
+        Default: 'None'.
+
+    start_time
+        Search for jobs where the start time of the job is greater than
+        or equal to the provided time stamp.  Any timestamp supported
+        by the Dateutil (required) module can be used.
+        Default: 'None'.
+
+    end_time
+        Search for jobs where the start time of the job is less than
+        or equal to the provided time stamp.  Any timestamp supported
+        by the Dateutil (required) module can be used.
+        Default: 'None'.
 
     CLI Example:
 
     .. code-block:: bash
 
         salt-run jobs.list_jobs
+        salt-run jobs.list_jobs search_function='test.*' search_target='localhost' search_metadata='{"bar": "foo"}'
+        salt-run jobs.list_jobs start_time='2015, Mar 16 19:00' end_time='2015, Mar 18 22:00'
+
     '''
     returner = _get_returner((__opts__['ext_job_cache'], ext_source, __opts__['master_job_cache']))
     if display_progress:
         __jid_event__.fire_event({'message': 'Querying returner {0} for jobs.'.format(returner)}, 'progress')
     mminion = salt.minion.MasterMinion(__opts__)
 
-    try:
-        ret = mminion.returners['{0}.get_jids'.format(returner)]()
-    except TypeError:
-        return 'Error: Requested returner could not be loaded. No jobs could be retrieved.'
+    ret = mminion.returners['{0}.get_jids'.format(returner)]()
 
-    if search_metadata:
-        mret = {}
-        for item in ret:
+    mret = {}
+    for item in ret:
+        _match = True
+        if search_metadata:
+            _match = False
             if 'Metadata' in ret[item]:
                 if isinstance(search_metadata, dict):
                     for key in search_metadata:
                         if key in ret[item]['Metadata']:
                             if ret[item]['Metadata'][key] == search_metadata[key]:
-                                mret[item] = ret[item]
+                                _match = True
                 else:
                     log.info('The search_metadata parameter must be specified'
                              ' as a dictionary.  Ignoring.')
-    else:
-        mret = ret.copy()
-
-    if search_target:
-        _mret = {}
-        for item in mret:
+        if search_target and _match:
+            _match = False
             if 'Target' in ret[item]:
                 if isinstance(search_target, list):
                     for key in search_target:
                         if fnmatch.fnmatch(ret[item]['Target'], key):
-                            _mret[item] = ret[item]
+                            _match = True
                 elif isinstance(search_target, six.string_types):
                     if fnmatch.fnmatch(ret[item]['Target'], search_target):
-                        _mret[item] = ret[item]
-        mret = _mret.copy()
+                        _match = True
 
-    if search_function:
-        _mret = {}
-        for item in mret:
+        if search_function and _match:
+            _match = False
             if 'Function' in ret[item]:
                 if isinstance(search_function, list):
                     for key in search_function:
                         if fnmatch.fnmatch(ret[item]['Function'], key):
-                            _mret[item] = ret[item]
+                            _match = True
                 elif isinstance(search_function, six.string_types):
                     if fnmatch.fnmatch(ret[item]['Function'], search_function):
-                        _mret[item] = ret[item]
-        mret = _mret.copy()
+                        _match = True
+
+        if start_time and _match:
+            _match = False
+            if DATEUTIL_SUPPORT:
+                parsed_start_time = dateutil_parser.parse(start_time)
+                _start_time = dateutil_parser.parse(ret[item]['StartTime'])
+                if _start_time >= parsed_start_time:
+                    _match = True
+            else:
+                log.error('"dateutil" library not available, skipping start_time comparision.')
+
+        if end_time and _match:
+            _match = False
+            if DATEUTIL_SUPPORT:
+                parsed_end_time = dateutil_parser.parse(end_time)
+                _start_time = dateutil_parser.parse(ret[item]['StartTime'])
+                if _start_time <= parsed_end_time:
+                    _match = True
+            else:
+                log.error('"dateutil" library not available, skipping start_time comparision.')
+
+        if _match:
+            mret[item] = ret[item]
 
     if outputter:
         return {'outputter': outputter, 'data': mret}
@@ -249,9 +336,52 @@ def print_job(jid, ext_source=None, outputter=None):
         return ret
     ret[jid]['Result'] = mminion.returners['{0}.get_jid'.format(returner)](jid)
     if outputter:
+        salt.utils.warn_until(
+            'Boron',
+            'The \'outputter\' argument to the jobs.print_job runner '
+            'has been deprecated. Please specify an outputter using --out. '
+            'See the output of \'salt-run -h\' for more information.'
+        )
         return {'outputter': outputter, 'data': ret}
     else:
         return ret
+
+
+def last_run(ext_source=None,
+             outputter=None,
+             metadata=None,
+             function=None,
+             target=None,
+             display_progress=False):
+    '''
+    List all detectable jobs and associated functions
+
+    .. versionadded:: Beryllium
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt-run jobs.last_run
+
+        salt-run jobs.last_run target=nodename
+
+        salt-run jobs.last_run function='cmd.run'
+
+        salt-run jobs.last_run metadata="{'foo': 'bar'}"
+    '''
+
+    if metadata:
+        if not isinstance(metadata, dict):
+            log.info('The metadata parameter must be specified as a dictionary')
+            return False
+
+    _all_jobs = list_jobs(ext_source, outputter, metadata, function, target, display_progress)
+    if _all_jobs:
+        last_job = sorted(_all_jobs)[-1]
+        return print_job(last_job, ext_source, outputter)
+    else:
+        return False
 
 
 def _get_returner(returner_types):

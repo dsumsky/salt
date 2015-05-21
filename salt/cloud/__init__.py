@@ -14,6 +14,7 @@ import signal
 import logging
 import traceback
 import multiprocessing
+import sys
 from itertools import groupby
 
 # Import salt.cloud libs
@@ -30,11 +31,17 @@ import salt.client
 import salt.loader
 import salt.utils
 import salt.utils.cloud
+import salt.syspaths
+from salt.utils import reinit_crypto
 from salt.utils import context
 from salt.ext.six import string_types
 from salt.template import compile_template
 
 # Import third party libs
+try:
+    import Crypto.Random
+except ImportError:
+    pass  # pycrypto < 2.1
 import yaml
 import salt.ext.six as six
 from salt.ext.six.moves import input  # pylint: disable=import-error,redefined-builtin
@@ -349,7 +356,7 @@ class CloudClient(object):
         '''
         Destroy the named VMs
         '''
-        mapper = salt.cloud.Map(self._opts_defaults())
+        mapper = salt.cloud.Map(self._opts_defaults(destroy=True))
         if isinstance(names, str):
             names = names.split(',')
         return salt.utils.cloud.simple_types_filter(
@@ -444,7 +451,7 @@ class CloudClient(object):
                 kwargs={'image': 'ami-10314d79'}
             )
         '''
-        mapper = salt.cloud.Map(self._opts_defaults(action=fun))
+        mapper = salt.cloud.Map(self._opts_defaults(action=fun, names=names))
         if names and not provider:
             self.opts['action'] = fun
             return mapper.do_action(names, kwargs)
@@ -1335,11 +1342,25 @@ class Cloud(object):
         ret = {}
         if not vm_overrides:
             vm_overrides = {}
+
+        try:
+            with salt.utils.fopen(self.opts['conf_file'], 'r') as mcc:
+                main_cloud_config = yaml.safe_load(mcc)
+            if not main_cloud_config:
+                main_cloud_config = {}
+        except KeyError:
+            main_cloud_config = {}
+        except IOError:
+            main_cloud_config = {}
+
         profile_details = self.opts['profiles'][profile]
         alias, driver = profile_details['provider'].split(':')
         mapped_providers = self.map_providers_parallel()
         alias_data = mapped_providers.setdefault(alias, {})
         vms = alias_data.setdefault(driver, {})
+
+        provider_details = self.opts['providers'][alias][driver].copy()
+        del provider_details['profiles']
 
         for name in names:
             name_exists = False
@@ -1357,8 +1378,11 @@ class Cloud(object):
                 ret[name] = {'Error': msg}
                 continue
 
-            vm_ = profile_details.copy()
+            vm_ = main_cloud_config.copy()
+            vm_.update(provider_details)
+            vm_.update(profile_details)
             vm_.update(vm_overrides)
+
             vm_['name'] = name
             if self.opts['parallel']:
                 process = multiprocessing.Process(
@@ -1506,7 +1530,7 @@ class Cloud(object):
                         'The cloud driver, {0!r}, configured under the '
                         '{1!r} cloud provider alias was not loaded since '
                         '\'{2}()\' could not be found. Removing it from '
-                        'the available providers list'.format(
+                        'the available providers list.'.format(
                             driver, alias, fun
                         )
                     )
@@ -1528,7 +1552,7 @@ class Cloud(object):
                             'The cloud driver, {0!r}, configured under the '
                             '{1!r} cloud provider alias is not properly '
                             'configured. Removing it from the available '
-                            'providers list'.format(driver, alias)
+                            'providers list.'.format(driver, alias)
                         )
                         self.opts['providers'][alias].pop(driver)
 
@@ -2213,12 +2237,7 @@ def run_parallel_map_providers_query(data, queue=None):
     This function will be called from another process when building the
     providers map.
     '''
-    try:
-        import Crypto.Random  # pylint: disable=E0611
-        Crypto.Random.atfork()
-    except ImportError:
-        # PyCrypto version < 2.1
-        pass
+    reinit_crypto()
 
     cloud = Cloud(data['opts'])
     try:

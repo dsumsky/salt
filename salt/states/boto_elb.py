@@ -234,7 +234,8 @@ def present(
         A list of availability zones for this ELB.
 
     listeners
-        A list of listener lists; example:
+        A list of listener lists; example::
+
             [
                 ['443', 'HTTPS', 'arn:aws:iam::1111111:server-certificate/mycert'],
                 ['8443', '80', 'HTTPS', 'HTTP', 'arn:aws:iam::1111111:server-certificate/mycert']
@@ -339,6 +340,69 @@ def present(
     return ret
 
 
+def register_instances(name, instances, region=None, key=None, keyid=None,
+                       profile=None):
+    '''
+    Add instance/s to load balancer
+
+    .. versionadded:: Beryllium
+
+    .. code-block:: yaml
+
+    add-instances:
+      boto_elb.register_instances:
+        - name: myloadbalancer
+        - instances:
+          - instance-id1
+          - instance-id2
+    '''
+    ret = {'name': name, 'result': None, 'comment': '', 'changes': {}}
+    ret['name'] = name
+    lb = __salt__['boto_elb.exists'](name, region, key, keyid, profile)
+    if lb:
+        health = __salt__['boto_elb.get_instance_health'](name,
+                                                          region,
+                                                          key,
+                                                          keyid,
+                                                          profile)
+        nodes = []
+        new = []
+        for value in health:
+            nodes.append(value['instance_id'])
+        for value in instances:
+            if value not in nodes:
+                new.append(value)
+        if len(new) == 0:
+            ret['comment'] = 'Instance/s {0} already exist.' \
+                              ''.format(str(instances).strip('[]'))
+            ret['result'] = True
+        else:
+            if __opts__['test']:
+                ret['comment'] = 'ELB {0} is set to register : {1}.'.format(name, new)
+                ret['result'] = None
+                return ret
+            state = __salt__['boto_elb.register_instances'](name,
+                                                            instances,
+                                                            region,
+                                                            key,
+                                                            keyid,
+                                                            profile)
+            if state:
+                ret['comment'] = 'Load Balancer {0} has been changed' \
+                                 ''.format(name)
+                ret['changes']['old'] = '\n'.join(nodes)
+                new = set().union(nodes, instances)
+                ret['changes']['new'] = '\n'.join(list(new))
+                ret['result'] = True
+            else:
+                ret['comment'] = 'Load balancer {0} failed to add instances' \
+                                 ''.format(name)
+                ret['result'] = False
+    else:
+        ret['comment'] = 'Could not find lb {0}'.format(name)
+    return ret
+
+
 def _elb_present(
         name,
         availability_zones,
@@ -422,6 +486,15 @@ def _elb_present(
             ret['comment'] = 'Failed to create {0} ELB.'.format(name)
     else:
         ret['comment'] = 'ELB {0} present.'.format(name)
+        _ret = _security_groups_present(
+            name, security_groups, region, key, keyid, profile
+        )
+        ret['changes'] = dictupdate.update(ret['changes'], _ret['changes'])
+        ret['comment'] = ' '.join([ret['comment'], _ret['comment']])
+        if not _ret['result']:
+            ret['result'] = _ret['result']
+            if ret['result'] is False:
+                return ret
         _ret = _listeners_present(name, _listeners, region, key, keyid,
                                   profile)
         ret['changes'] = dictupdate.update(ret['changes'], _ret['changes'])
@@ -507,6 +580,48 @@ def _listeners_present(
     return ret
 
 
+def _security_groups_present(
+        name,
+        security_groups,
+        region,
+        key,
+        keyid,
+        profile):
+    ret = {'result': True, 'comment': '', 'changes': {}}
+    lb = __salt__['boto_elb.get_elb_config'](name, region, key, keyid, profile)
+    if not lb:
+        msg = '{0} ELB configuration could not be retrieved.'.format(name)
+        ret['comment'] = msg
+        ret['result'] = False
+        return ret
+    if not security_groups:
+        security_groups = []
+    change_needed = False
+    if set(security_groups) != set(lb['security_groups']):
+        change_needed = True
+    if change_needed:
+        if __opts__['test']:
+            msg = 'ELB {0} set to have security groups modified.'.format(name)
+            ret['comment'] = msg
+            ret['result'] = None
+            return ret
+        changed = __salt__['boto_elb.apply_security_groups'](
+            name, security_groups, region, key, keyid, profile
+        )
+        if changed:
+            msg = 'Modified security_groups on {0} ELB.'.format(name)
+            ret['comment'] = msg
+        else:
+            msg = 'Failed to modify security_groups on {0} ELB.'.format(name)
+            ret['comment'] = msg
+            ret['result'] = False
+        ret['changes']['old'] = {'security_groups': lb['security_groups']}
+        ret['changes']['new'] = {'security_groups': security_groups}
+    else:
+        ret['comment'] = 'security_groups already set on ELB {0}.'.format(name)
+    return ret
+
+
 def _attributes_present(
         name,
         attributes,
@@ -535,6 +650,11 @@ def _attributes_present(
         if (cd['enabled'] != _cd['enabled']
                 or cd.get('timeout', 300) != _cd.get('timeout')):
             attrs_to_set.append('connection_draining')
+    if 'connecting_settings' in attributes:
+        cs = attributes['connecting_settings']
+        _cs = _attributes['connecting_settings']
+        if cs['idle_timeout'] != _cs['idle_timeout']:
+            attrs_to_set.append('connecting_settings')
     if 'access_log' in attributes:
         for attr, val in six.iteritems(attributes['access_log']):
             if str(_attributes['access_log'][attr]) != str(val):

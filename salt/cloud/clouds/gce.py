@@ -529,7 +529,7 @@ def __get_ssh_credentials(vm_):
         'ssh_username', vm_, __opts__, default=os.getenv('USER'))
     ssh_key = config.get_cloud_config_value(
         'ssh_keyfile', vm_, __opts__,
-        default=os.getenv('HOME') + '/.ssh/google_compute_engine')
+        default=os.path.expanduser('~/.ssh/google_compute_engine'))
     return ssh_user, ssh_key
 
 
@@ -2047,7 +2047,11 @@ def create(vm_=None, call=None):
             'ex_disk_type': config.get_cloud_config_value(
                 'ex_disk_type', vm_, __opts__, default='pd-standard'),
             'ex_disk_auto_delete': config.get_cloud_config_value(
-                'ex_disk_auto_delete', vm_, __opts__, default=True)
+                'ex_disk_auto_delete', vm_, __opts__, default=True),
+            'ex_disks_gce_struct': config.get_cloud_config_value(
+                'ex_disks_gce_struct', vm_, __opts__, default=None),
+            'ex_service_accounts': config.get_cloud_config_value(
+                'ex_service_accounts', vm_, __opts__, default=None)
         })
         if kwargs.get('ex_disk_type') not in ('pd-standard', 'pd-ssd'):
             raise SaltCloudSystemExit(
@@ -2079,7 +2083,7 @@ def create(vm_=None, call=None):
     )
 
     try:
-        node_data = conn.create_node(**kwargs)  # pylint: disable=W0142
+        node_data = conn.create_node(**kwargs)
     except Exception as exc:  # pylint: disable=W0703
         log.error(
             'Error creating {0} on GCE\n\n'
@@ -2175,7 +2179,6 @@ def create(vm_=None, call=None):
             transport=__opts__['transport']
         )
 
-        # pylint: disable=W0142
         deployed = salt.utils.cloud.deploy_script(**deploy_kwargs)
         if deployed:
             log.info('Salt installed on {0}'.format(vm_['name']))

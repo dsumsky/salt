@@ -19,6 +19,7 @@ try:
     import salt.master
     import salt.crypt
     import salt.daemons.masterapi
+    import salt.payload
     HAS_ZMQ = True
 except ImportError:
     HAS_ZMQ = False
@@ -49,41 +50,54 @@ class SaltZmqSetup(ioflo.base.deeding.Deed):
         self.aes.value = self.opts.value['aes']
 
 
-class SaltZmqRetFork(ioflo.base.deeding.Deed):
+@ioflo.base.deeding.deedify(
+        'SaltZmqRetFork',
+        ioinits={
+            'opts': '.salt.opts',
+            'proc_mgr': '.salt.usr.proc_mgr',
+            'mkey': '.salt.var.zmq.master_key',
+            'aes': '.salt.var.zmq.aes'})
+def zmq_ret_fork(self):
     '''
     Create the forked process for the ZeroMQ Ret Port
     '''
-    Ioinits = {'opts': '.salt.opts',
-               'mkey': '.salt.var.zmq.master_key',
-               'aes': '.salt.var.zmq.aes'}
+    self.proc_mgr.value.add_process(
+            ZmqRet,
+            args=(
+                self.opts.value,
+                self.mkey.value,
+                self.aes.value))
 
-    def action(self):
-        '''
-        Create the ZMQ Ret Port process fork
-        '''
-        proc = multiprocessing.Process(target=self._ret_port)
-        proc.start()
-        log.info('Started ZeroMQ RET port process')
 
-    def _ret_port(self):
+class ZmqRet(multiprocessing.Process):
+    '''
+    Create the forked process for the ZeroMQ Ret Port
+    '''
+    def __init__(self, opts, mkey, aes):
+        self.opts = opts
+        self.mkey = mkey
+        self.aes = aes
+        super(ZmqRet, self).__init__()
+
+    def run(self):
         '''
         Start the ret port binding
         '''
-        self.context = zmq.Context(self.opts.value['worker_threads'])
-        self.uri = 'tcp://{interface}:{ret_port}'.format(**self.opts.value)
+        self.context = zmq.Context(self.opts['worker_threads'])
+        self.uri = 'tcp://{interface}:{ret_port}'.format(**self.opts)
         log.info('ZMQ Ret port binding to {0}'.format(self.uri))
         self.clients = self.context.socket(zmq.ROUTER)
-        if self.opts.value['ipv6'] is True and hasattr(zmq, 'IPV4ONLY'):
+        if self.opts['ipv6'] is True and hasattr(zmq, 'IPV4ONLY'):
             # IPv6 sockets work for both IPv6 and IPv4 addresses
             self.clients.setsockopt(zmq.IPV4ONLY, 0)
         try:
-            self.clients.setsockopt(zmq.HWM, self.opts.value['rep_hwm'])
+            self.clients.setsockopt(zmq.HWM, self.opts['rep_hwm'])
         except AttributeError:
-            self.clients.setsockopt(zmq.SNDHWM, self.opts.value['rep_hwm'])
-            self.clients.setsockopt(zmq.RCVHWM, self.opts.value['rep_hwm'])
+            self.clients.setsockopt(zmq.SNDHWM, self.opts['rep_hwm'])
+            self.clients.setsockopt(zmq.RCVHWM, self.opts['rep_hwm'])
         self.workers = self.context.socket(zmq.DEALER)
         self.w_uri = 'ipc://{0}'.format(
-            os.path.join(self.opts.value['sock_dir'], 'workers.ipc')
+            os.path.join(self.opts['sock_dir'], 'workers.ipc')
         )
 
         log.info('Setting up the master communication server')
@@ -143,6 +157,8 @@ class SaltZmqPublisher(ioflo.base.deeding.Deed):
         '''
         Set up tracking value(s)
         '''
+        if not HAS_ZMQ:
+            return
         self.created = False
         self.serial = salt.payload.Serial(self.opts.value)
 
@@ -207,7 +223,6 @@ class SaltZmqWorker(ioflo.base.deeding.Deed):
     The zeromq behavior for the workers
     '''
     Ioinits = {'opts': '.salt.opts',
-               'mkey': '.salt.var.zmq.master_key',
                'key': '.salt.access_keys',
                'aes': '.salt.var.zmq.aes'}
 
@@ -225,10 +240,9 @@ class SaltZmqWorker(ioflo.base.deeding.Deed):
         if not self.created:
             crypticle = salt.crypt.Crypticle(self.opts.value, self.aes.value)
             self.worker = salt.master.FloMWorker(
-                    self.opts.value,
-                    self.mkey.value,
-                    self.key.value,
-                    crypticle)
+                self.opts.value,
+                self.key.value,
+            )
             self.worker.setup()
             self.created = True
             log.info('Started ZMQ worker')

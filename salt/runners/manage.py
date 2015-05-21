@@ -25,6 +25,7 @@ import salt.utils.minions
 import salt.wheel
 import salt.version
 from salt.utils.event import tagify
+from salt.exceptions import SaltClientError
 
 FINGERPRINT_REGEX = re.compile(r'^([a-f0-9]{2}:){15}([a-f0-9]{2})$')
 
@@ -39,13 +40,17 @@ def status(output=True):
 
         salt-run manage.status
     '''
+    ret = {}
     client = salt.client.get_local_client(__opts__['conf_file'])
-    minions = client.cmd('*', 'test.ping', timeout=__opts__['timeout'])
+    try:
+        minions = client.cmd('*', 'test.ping', timeout=__opts__['timeout'])
+    except SaltClientError as client_error:
+        print(client_error)
+        return ret
 
     key = salt.key.Key(__opts__)
     keys = key.list_keys()
 
-    ret = {}
     ret['up'] = sorted(minions)
     ret['down'] = sorted(set(keys['minions']) - set(minions))
     return ret
@@ -77,7 +82,11 @@ def key_regen():
         salt-run manage.key_regen
     '''
     client = salt.client.get_local_client(__opts__['conf_file'])
-    client.cmd('*', 'saltutil.regen_keys')
+    try:
+        client.cmd('*', 'saltutil.regen_keys')
+    except SaltClientError as client_error:
+        print(client_error)
+        return False
 
     for root, _, files in os.walk(__opts__['pki_dir']):
         for fn_ in files:
@@ -148,6 +157,8 @@ def list_state(subset=None, show_ipv4=False, state=None):
         Show minions being in specific state that is one of 'available', 'joined',
         'allowed', 'alived' or 'reaped'.
 
+    .. versionadded:: Beryllium
+
     CLI Example:
 
     .. code-block:: bash
@@ -192,6 +203,8 @@ def list_not_state(subset=None, show_ipv4=False, state=None):
         Show minions being in specific state that is one of 'available', 'joined',
         'allowed', 'alived' or 'reaped'.
 
+    .. versionadded:: Beryllium
+
     CLI Example:
 
     .. code-block:: bash
@@ -223,11 +236,15 @@ def present(subset=None, show_ipv4=False):
     Print a list of all minions that are up according to Salt's presence
     detection (no commands will be sent to minions)
 
+    .. versionadded:: Beryllium
+
     subset : None
         Pass in a CIDR range to filter minions by IP address.
 
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
+
+    .. versionadded:: Beryllium
 
     CLI Example:
 
@@ -249,6 +266,8 @@ def not_present(subset=None, show_ipv4=False):
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
 
+    .. versionadded:: Beryllium
+
     CLI Example:
 
     .. code-block:: bash
@@ -268,6 +287,8 @@ def joined(subset=None, show_ipv4=False):
 
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
+
+    .. versionadded:: Beryllium
 
     CLI Example:
 
@@ -289,6 +310,8 @@ def not_joined(subset=None, show_ipv4=False):
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
 
+    .. versionadded:: Beryllium
+
     CLI Example:
 
     .. code-block:: bash
@@ -308,6 +331,8 @@ def allowed(subset=None, show_ipv4=False):
 
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
+
+    .. versionadded:: Beryllium
 
     CLI Example:
 
@@ -329,6 +354,8 @@ def not_allowed(subset=None, show_ipv4=False):
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
 
+    .. versionadded:: Beryllium
+
     CLI Example:
 
     .. code-block:: bash
@@ -348,6 +375,8 @@ def alived(subset=None, show_ipv4=False):
 
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
+
+    .. versionadded:: Beryllium
 
     CLI Example:
 
@@ -369,6 +398,8 @@ def not_alived(subset=None, show_ipv4=False):
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
 
+    .. versionadded:: Beryllium
+
     CLI Example:
 
     .. code-block:: bash
@@ -389,6 +420,8 @@ def reaped(subset=None, show_ipv4=False):
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
 
+    .. versionadded:: Beryllium
+
     CLI Example:
 
     .. code-block:: bash
@@ -408,6 +441,8 @@ def not_reaped(subset=None, show_ipv4=False):
 
     show_ipv4 : False
         Also show the IP address each minion is connecting from.
+
+    .. versionadded:: Beryllium
 
     CLI Example:
 
@@ -542,8 +577,13 @@ def versions():
 
         salt-run manage.versions
     '''
+    ret = {}
     client = salt.client.get_local_client(__opts__['conf_file'])
-    minions = client.cmd('*', 'test.version', timeout=__opts__['timeout'])
+    try:
+        minions = client.cmd('*', 'test.version', timeout=__opts__['timeout'])
+    except SaltClientError as client_error:
+        print(client_error)
+        return ret
 
     labels = {
         -1: 'Minion requires update',
@@ -567,7 +607,6 @@ def versions():
     # Add version of Master to output
     version_status[2] = master_version.string
 
-    ret = {}
     for key in version_status:
         if key == 2:
             ret[labels[key]] = version_status[2]

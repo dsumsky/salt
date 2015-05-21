@@ -4,6 +4,38 @@
 Requisites and Other Global State Arguments
 ===========================================
 
+Fire Event Notifications
+========================
+
+.. versionadded:: Beryllium
+
+The `fire_event` option in a state will cause the minion to send an event to
+the Salt Master upon completion of that individual state.
+
+The following example will cause the minion to send an event to the Salt Master
+with a tag of `salt/state_result/20150505121517276431/dasalt/nano` and the
+result of the state will be the data field of the event. Notice that the `name`
+of the state gets added to the tag.
+
+.. code-block:: yaml
+
+    nano_stuff:
+      pkg.installed:
+        - name: nano
+        - fire_event: True
+
+In the following example instead of setting `fire_event` to `True`,
+`fire_event` is set to an arbitrary string, which will cause the event to be
+sent with this tag:
+`salt/state_result/20150505121725642845/dasalt/custom/tag/nano/finished`
+
+.. code-block:: yaml
+
+    nano_stuff:
+      pkg.installed:
+        - name: nano
+        - fire_event: custom/tag/nano/finished
+
 Requisites
 ==========
 
@@ -428,6 +460,11 @@ the specified commands return ``False``. The ``unless`` requisite operates
 as NOR and is useful in giving more granular control over when a state should
 execute.
 
+**NOTE**: Under the hood ``unless`` calls ``cmd.retcode`` with 
+``python_shell=True``.  This means the commands referenced by unless will be
+parsed by a shell, so beware of side-effects as this shell will be run with the
+same privileges as the salt-minion.
+
 .. code-block:: yaml
 
     vim:
@@ -443,7 +480,7 @@ exist (returns ``False``). The state will run if both commands return
 
 However, the state will not run if both commands return ``True``.
 
-Unless requisites are resolved for each name to which they are associated.
+Unless checks are resolved for each name to which they are associated.
 
 For example:
 
@@ -451,9 +488,10 @@ For example:
 
     deploy_app:
       cmd.run:
-        - first_deploy_cmd
-        - second_deploy_cmd
-      - unless: some_check
+        - names:
+          - first_deploy_cmd
+          - second_deploy_cmd
+        - unless: some_check
 
 In the above case, ``some_check`` will be run prior to _each_ name -- once for
 ``first_deploy_cmd`` and a second time for ``second_deploy_cmd``.
@@ -466,6 +504,11 @@ Onlyif
 ``onlyif`` is the opposite of ``unless``. If all of the commands in ``onlyif``
 return ``True``, then the state is run. If any of the specified commands
 return ``False``, the state will not run.
+
+**NOTE**: Under the hood ``onlyif`` calls ``cmd.retcode`` with 
+``python_shell=True``.  This means the commands referenced by unless will be
+parsed by a shell, so beware of side-effects as this shell will be run with the
+same privileges as the salt-minion.
 
 .. code-block:: yaml
 
@@ -540,6 +583,11 @@ check_cmd
 
 Check Command is used for determining that a state did or did not run as
 expected.
+
+**NOTE**: Under the hood ``check_cmd`` calls ``cmd.retcode`` with 
+``python_shell=True``.  This means the commands referenced by unless will be
+parsed by a shell, so beware of side-effects as this shell will be run with the
+same privileges as the salt-minion.
 
 .. code-block:: yaml
 

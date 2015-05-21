@@ -18,6 +18,7 @@ import logging
 # Import salt libs
 import salt.crypt
 import salt.utils
+import salt.exceptions
 import salt.utils.event
 import salt.daemons.masterapi
 from salt.utils import kinds
@@ -27,7 +28,7 @@ from salt.utils.event import tagify
 # pylint: disable=import-error,no-name-in-module,redefined-builtin
 import salt.ext.six as six
 from salt.ext.six.moves import input
-# pylint: disable=import-error,no-name-in-module,redefined-builtin
+# pylint: enable=import-error,no-name-in-module,redefined-builtin
 try:
     import msgpack
 except ImportError:
@@ -37,7 +38,7 @@ log = logging.getLogger(__name__)
 
 
 def get_key(opts):
-    if opts['transport'] == 'zeromq':
+    if opts['transport'] in ('zeromq', 'tcp'):
         return Key(opts)
     else:
         return RaetKey(opts)
@@ -49,7 +50,7 @@ class KeyCLI(object):
     '''
     def __init__(self, opts):
         self.opts = opts
-        if self.opts['transport'] == 'zeromq':
+        if self.opts['transport'] in ('zeromq', 'tcp'):
             self.key = Key(opts)
         else:
             self.key = RaetKey(opts)
@@ -127,7 +128,7 @@ class KeyCLI(object):
                 .format(match, 'or rejected ' if include_rejected else '')
             )
             print(msg)
-            return
+            raise salt.exceptions.SaltSystemExit(code=1)
         if not self.opts.get('yes', False):
             print('The following keys are going to be accepted:')
             salt.output.display_output(
@@ -191,7 +192,7 @@ class KeyCLI(object):
                 'The key glob {0!r} does not match any accepted, unaccepted '
                 'or rejected keys.'.format(match)
             )
-            return
+            raise salt.exceptions.SystemExit(code=1)
         if not self.opts.get('yes', False):
             print('The following keys are going to be deleted:')
             salt.output.display_output(
@@ -650,7 +651,7 @@ class Key(object):
         # We have to differentiate between RaetKey._check_minions_directories
         # and Zeromq-Keys. Raet-Keys only have three states while ZeroMQ-keys
         # havd an additional 'denied' state.
-        if self.opts['transport'] == 'zeromq':
+        if self.opts['transport'] in ('zeromq', 'tcp'):
             key_dirs = self._check_minions_directories()
         else:
             key_dirs = self._check_minions_directories()
@@ -661,8 +662,9 @@ class Key(object):
             ret[os.path.basename(dir_)] = []
             try:
                 for fn_ in salt.utils.isorted(os.listdir(dir_)):
-                    if os.path.isfile(os.path.join(dir_, fn_)):
-                        ret[os.path.basename(dir_)].append(fn_)
+                    if not fn_.startswith('.'):
+                        if os.path.isfile(os.path.join(dir_, fn_)):
+                            ret[os.path.basename(dir_)].append(fn_)
             except (OSError, IOError):
                 # key dir kind is not created yet, just skip
                 continue

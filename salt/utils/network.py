@@ -15,6 +15,10 @@ from string import ascii_letters, digits
 
 # Import 3rd-party libs
 import salt.ext.six as six
+if six.PY3:
+    import ipaddress
+else:
+    import salt.ext.ipaddress as ipaddress
 from salt.ext.six.moves import range  # pylint: disable=import-error,redefined-builtin
 # Attempt to import wmi
 try:
@@ -25,6 +29,7 @@ except ImportError:
 
 # Import salt libs
 import salt.utils
+from salt._compat import subprocess
 
 log = logging.getLogger(__name__)
 
@@ -137,48 +142,43 @@ def _sort_hostnames(hostname_list):
         'fe02::',
     ]
 
-    def _cmp_hostname(a, b):
+    def _key_hostname(e):
         # should never have a space in hostname
-        if ' ' in a:
-            return 1
-        if ' ' in b:
-            return -1
+        # favor hostnames w/o spaces
+        if ' ' in e:
+            first = 1
+        else:
+            first = -1
 
         # punish localhost list
-        if a in punish:
-            if b in punish:
-                return punish.index(a) - punish.index(b)
-            return 1
-        if b in punish:
-            return -1
+        if e in punish:
+            second = punish.index(e)
+        else:
+            second = -1
 
         # punish ipv6
-        if ':' in a or ':' in b:
-            return a.count(':') - b.count(':')
+        third = e.count(':')
 
         # punish ipv4
-        a_is_ipv4 = a.count('.') == 3 and not any(c.isalpha() for c in a)
-        b_is_ipv4 = b.count('.') == 3 and not any(c.isalpha() for c in b)
-        if a_is_ipv4 and a.startswith('127.'):
-            return 1
-        if b_is_ipv4 and b.startswith('127.'):
-            return -1
-        if a_is_ipv4 and not b_is_ipv4:
-            return 1
-        if a_is_ipv4 and b_is_ipv4:
-            return 0
-        if not a_is_ipv4 and b_is_ipv4:
-            return -1
+        # punish ipv4 addresses that start with '127.' more
+        e_is_ipv4 = e.count('.') == 3 and not any(c.isalpha() for c in e)
+        if e_is_ipv4:
+            if e.startswith('127.'):
+                fourth = 1
+            else:
+                fourth = 0
+        else:
+            fourth = -1
 
         # favor hosts with more dots
-        diff = b.count('.') - a.count('.')
-        if diff != 0:
-            return diff
+        fifth = -(e.count('.'))
 
         # favor longest fqdn
-        return len(b) - len(a)
+        sixth = -(len(e))
 
-    return sorted(hostname_list, cmp=_cmp_hostname)
+        return (first, second, third, fourth, fifth, sixth)
+
+    return sorted(hostname_list, key=_key_hostname)
 
 
 def get_hostnames():
@@ -271,12 +271,11 @@ def generate_minion_id():
     '''
     possible_ids = get_hostnames()
 
-    ip_addresses = [IPv4Address(addr) for addr
-                    in salt.utils.network.ip_addrs(include_loopback=True)
-                    if not addr.startswith('127.')]
-
     # include public and private ipaddresses
-    for addr in ip_addresses:
+    for addr in salt.utils.network.ip_addrs():
+        addr = ipaddress.ip_address(addr)
+        if addr.is_loopback:
+            continue
         possible_ids.append(str(addr))
 
     possible_ids = _filter_localhost_names(possible_ids)
@@ -287,6 +286,20 @@ def generate_minion_id():
 
     hosts = _sort_hostnames(possible_ids)
     return hosts[0]
+
+
+def get_socket(addr, type=socket.SOCK_STREAM, proto=0):
+    '''
+    Return a socket object for the addr
+    IP-version agnostic
+    '''
+
+    version = ipaddress.ip_address(addr).version
+    if version == 4:
+        family = socket.AF_INET
+    elif version == 6:
+        family = socket.AF_INET6
+    return socket.socket(family, type, proto)
 
 
 def get_fqhostname():
@@ -339,6 +352,54 @@ def ip_to_host(ip):
     return hostname
 
 # pylint: enable=C0103
+
+
+def _validate_ip(af, ip):
+    '''
+    Common logic for IPv4
+    '''
+    if af == socket.AF_INET6 and not socket.has_ipv6:
+        raise RuntimeError('IPv6 not supported')
+    try:
+        socket.inet_pton(af, ip)
+    except AttributeError:
+        if af == socket.AF_INET6:
+            raise RuntimeError('socket.inet_pton not available')
+        try:
+            socket.inet_aton(ip)
+        except socket.error:
+            return False
+    except (socket.error, TypeError):
+        return False
+    return True
+
+
+def is_ip(ip):
+    '''
+    Returns a bool telling if the passed IP is a valid IPv4 or IPv6 address.
+
+    Will raise a RuntimeError if IPv6 is not supported on the host.
+    '''
+    for af in (socket.AF_INET, socket.AF_INET6):
+        if _validate_ip(af, ip):
+            return True
+    return False
+
+
+def is_ipv4(ip):
+    '''
+    Returns a bool telling if the value passed to it was a valid IPv4 address
+    '''
+    return _validate_ip(socket.AF_INET, ip)
+
+
+def is_ipv6(ip):
+    '''
+    Returns a bool telling if the value passed to it was a valid IPv6 address
+
+    Will raise a RuntimeError if IPv6 is not supported on the host.
+    '''
+    return _validate_ip(socket.AF_INET6, ip)
 
 
 def cidr_to_ipv4_netmask(cidr_bits):
@@ -578,7 +639,7 @@ def linux_interfaces():
             close_fds=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT).communicate()[0]
-        ifaces = _interfaces_ip(cmd1 + '\n' + cmd2)
+        ifaces = _interfaces_ip("{0}\n{1}".format(cmd1, cmd2))
     elif ifconfig_path:
         cmd = subprocess.Popen(
             '{0} -a'.format(ifconfig_path),
@@ -703,6 +764,10 @@ def get_net_start(ipaddr, netmask):
 
 
 def get_net_size(mask):
+    '''
+    Turns an IPv4 netmask into it's corresponding prefix length
+    (255.255.255.0 -> 24 as in 192.168.1.10/24).
+    '''
     binary_str = ''
     for octet in mask.split('.'):
         binary_str += bin(int(octet))[2:].zfill(8)
@@ -710,8 +775,11 @@ def get_net_size(mask):
 
 
 def calculate_subnet(ipaddr, netmask):
-    return '{0}/{1}'.format(get_net_start(ipaddr, netmask),
-                            get_net_size(netmask))
+    '''
+    Takes IP and netmask and returns the network in CIDR-notation.
+    (The IP can be any IP inside this subnet.)
+    '''
+    return str(ipaddress.ip_network('{0}/{1}'.format(ipaddr, netmask), strict=False))
 
 
 def _ipv4_to_bits(ipaddr):
@@ -722,25 +790,56 @@ def _ipv4_to_bits(ipaddr):
     return ''.join([bin(int(x))[2:].rjust(8, '0') for x in ipaddr.split('.')])
 
 
+def _get_iface_info(iface):
+    '''
+    If `iface` is available, return interface info and no error, otherwise
+    return no info and log and return an error
+    '''
+    iface_info = interfaces()
+
+    if iface in iface_info.keys():
+        return iface_info, False
+    else:
+        error_msg = ('Interface "{0}" not in available interfaces: "{1}"'
+                     ''.format(iface, '", "'.join(iface_info.keys())))
+        log.error(error_msg)
+        return None, error_msg
+
+
 def hw_addr(iface):
     '''
     Return the hardware address (a.k.a. MAC address) for a given interface
     '''
-    return interfaces().get(iface, {}).get('hwaddr', '')
+    iface_info, error = _get_iface_info(iface)
+
+    if error is False:
+        return iface_info.get(iface, {}).get('hwaddr', '')
+    else:
+        return error
 
 
 def interface(iface):
     '''
-    Return the interface details
+    Return the details of `iface` or an error if it does not exist
     '''
-    return interfaces().get(iface, {}).get('inet', '')
+    iface_info, error = _get_iface_info(iface)
+
+    if error is False:
+        return iface_info.get(iface, {}).get('inet', '')
+    else:
+        return error
 
 
 def interface_ip(iface):
     '''
-    Return the interface details
+    Return `iface` IPv4 addr or an error if `iface` does not exist
     '''
-    return interfaces().get(iface, {}).get('inet', {})[0].get('address', {})
+    iface_info, error = _get_iface_info(iface)
+
+    if error is False:
+        return iface_info.get(iface, {}).get('inet', {})[0].get('address', '')
+    else:
+        return error
 
 
 def subnets():
@@ -764,32 +863,17 @@ def in_subnet(cidr, addrs=None):
     Returns True if host is within specified subnet, otherwise False
     '''
     try:
-        netstart, netsize = cidr.split('/')
-        netsize = int(netsize)
-    except Exception:
+        cidr = ipaddress.ip_network(cidr)
+    except ValueError:
         log.error('Invalid CIDR \'{0}\''.format(cidr))
         return False
-
-    netstart_bin = _ipv4_to_bits(netstart)
-
-    if netsize < 32 and len(netstart_bin.rstrip('0')) > netsize:
-        log.error('Invalid network starting IP \'{0}\' in CIDR '
-                  '\'{1}\''.format(netstart, cidr))
-        return False
-
-    netstart_leftbits = netstart_bin[0:netsize]
 
     if addrs is None:
         addrs = ip_addrs()
 
     for ip_addr in addrs:
-        if netsize == 32:
-            if netstart == ip_addr:
-                return True
-        else:
-            ip_leftbits = _ipv4_to_bits(ip_addr)[0:netsize]
-            if netstart_leftbits == ip_leftbits:
-                return True
+        if ipaddress.ip_address(ip_addr) in cidr:
+            return True
     return False
 
 
@@ -797,21 +881,19 @@ def ip_in_subnet(ip_addr, cidr):
     '''
     Returns True if given IP is within specified subnet, otherwise False
     '''
-    ipaddr = int(''.join(['%02x' % int(x) for x in ip_addr.split('.')]), 16)  # pylint: disable=E1321
-    netstr, bits = cidr.split('/')
-    netaddr = int(''.join(['%02x' % int(x) for x in netstr.split('.')]), 16)  # pylint: disable=E1321
-    mask = (0xffffffff << (32 - int(bits))) & 0xffffffff
-    return (ipaddr & mask) == (netaddr & mask)
+    return in_subnet(cidr, [ip_addr])
 
 
-def ip_addrs(interface=None, include_loopback=False):
+def ip_addrs(interface=None, include_loopback=False, interface_data=None):
     '''
     Returns a list of IPv4 addresses assigned to the host. 127.0.0.1 is
     ignored, unless 'include_loopback=True' is indicated. If 'interface' is
     provided, then only IP addresses from that interface will be returned.
     '''
     ret = set()
-    ifaces = interfaces()
+    ifaces = interface_data \
+        if isinstance(interface_data, dict) \
+        else interfaces()
     if interface is None:
         target_ifaces = ifaces
     else:
@@ -832,14 +914,16 @@ def ip_addrs(interface=None, include_loopback=False):
     return sorted(list(ret))
 
 
-def ip_addrs6(interface=None, include_loopback=False):
+def ip_addrs6(interface=None, include_loopback=False, interface_data=None):
     '''
     Returns a list of IPv6 addresses assigned to the host. ::1 is ignored,
     unless 'include_loopback=True' is indicated. If 'interface' is provided,
     then only IP addresses from that interface will be returned.
     '''
     ret = set()
-    ifaces = interfaces()
+    ifaces = interface_data \
+        if isinstance(interface_data, dict) \
+        else interfaces()
     if interface is None:
         target_ifaces = ifaces
     else:
@@ -968,7 +1052,7 @@ def _sunos_remotes_on(port, which_end):
     '''
     remotes = set()
     try:
-        data = subprocess.check_output(['netstat', '-f', 'inet', '-n'])
+        data = subprocess.check_output(['netstat', '-f', 'inet', '-n'])  # pylint: disable=minimum-python-version
     except subprocess.CalledProcessError:
         log.error('Failed netstat')
         raise
@@ -1014,7 +1098,7 @@ def _freebsd_remotes_on(port, which_end):
 
     try:
         cmd = shlex.split('sockstat -4 -c -p {0}'.format(port))
-        data = subprocess.check_output(cmd)
+        data = subprocess.check_output(cmd)  # pylint: disable=minimum-python-version
     except subprocess.CalledProcessError as ex:
         log.error('Failed "sockstat" with returncode = {0}'.format(ex.returncode))
         raise
@@ -1046,6 +1130,44 @@ def _freebsd_remotes_on(port, which_end):
     return remotes
 
 
+def _windows_remotes_on(port, which_end):
+    r'''
+    Windows specific helper function.
+    Returns set of ipv4 host addresses of remote established connections
+    on local or remote tcp port.
+
+    Parses output of shell 'netstat' to get connections
+
+    C:\>netstat -n
+
+    Active Connections
+
+       Proto  Local Address          Foreign Address        State
+       TCP    10.2.33.17:3007        130.164.12.233:10123   ESTABLISHED
+       TCP    10.2.33.17:3389        130.164.30.5:10378     ESTABLISHED
+    '''
+    remotes = set()
+    try:
+        data = subprocess.check_output(['netstat', '-n'])  # pylint: disable=minimum-python-version
+    except subprocess.CalledProcessError:
+        log.error('Failed netstat')
+        raise
+
+    lines = data.split('\n')
+    for line in lines:
+        if 'ESTABLISHED' not in line:
+            continue
+        chunks = line.split()
+        local_host, local_port = chunks[1].rsplit(':', 1)
+        remote_host, remote_port = chunks[2].rsplit(':', 1)
+        if which_end == 'remote_port' and int(remote_port) != port:
+            continue
+        if which_end == 'local_port' and int(local_port) != port:
+            continue
+        remotes.add(remote_host)
+    return remotes
+
+
 def remotes_on_local_tcp_port(port):
     '''
     Returns set of ipv4 host addresses of remote established connections
@@ -1068,9 +1190,11 @@ def remotes_on_local_tcp_port(port):
         return _sunos_remotes_on(port, 'local_port')
     if salt.utils.is_freebsd():
         return _freebsd_remotes_on(port, 'local_port')
+    if salt.utils.is_windows():
+        return _windows_remotes_on(port, 'local_port')
 
     try:
-        data = subprocess.check_output(['lsof', '-i4TCP:{0:d}'.format(port), '-n'])
+        data = subprocess.check_output(['lsof', '-i4TCP:{0:d}'.format(port), '-n'])  # pylint: disable=minimum-python-version
     except subprocess.CalledProcessError as ex:
         log.error('Failed "lsof" with returncode = {0}'.format(ex.returncode))
         raise
@@ -1119,9 +1243,11 @@ def remotes_on_remote_tcp_port(port):
         return _sunos_remotes_on(port, 'remote_port')
     if salt.utils.is_freebsd():
         return _freebsd_remotes_on(port, 'remote_port')
+    if salt.utils.is_windows():
+        return _windows_remotes_on(port, 'remote_port')
 
     try:
-        data = subprocess.check_output(['lsof', '-i4TCP:{0:d}'.format(port), '-n'])
+        data = subprocess.check_output(['lsof', '-i4TCP:{0:d}'.format(port), '-n'])  # pylint: disable=minimum-python-version
     except subprocess.CalledProcessError as ex:
         log.error('Failed "lsof" with returncode = {0}'.format(ex.returncode))
         raise
@@ -1147,60 +1273,3 @@ def remotes_on_remote_tcp_port(port):
         remotes.add(rhost)
 
     return remotes
-
-
-class IPv4Address(object):
-    '''
-    A very minimal subset of the IPv4Address object in the ip_address module.
-    '''
-
-    def __init__(self, address_str):
-        self.address_str = address_str
-        octets = self.address_str.split('.')
-        if len(octets) != 4:
-            raise ValueError(
-                'IPv4 addresses must be in dotted-quad form.'
-            )
-        try:
-            self.dotted_quad = [int(octet) for octet in octets]
-        except ValueError as err:
-            raise ValueError(
-                'IPv4 addresses must be in dotted-quad form. {0}'.format(err)
-            )
-
-    def __str__(self):
-        return self.address_str
-
-    def __repr__(self):
-        return 'IPv4Address("{0}")'.format(str(self))
-
-    def __cmp__(self, other):
-        return cmp(self.dotted_quad, other.dotted_quad)
-
-    @property
-    def is_private(self):
-        '''
-        :return: Returns True if the address is a non-routable IPv4 address.
-                 Otherwise False.
-        '''
-        if 10 == self.dotted_quad[0]:
-            return True
-        if 172 == self.dotted_quad[0]:
-            return 16 <= self.dotted_quad[1] <= 31
-        if 192 == self.dotted_quad[0]:
-            return 168 == self.dotted_quad[1]
-        return False
-
-    @property
-    def is_loopback(self):
-        '''
-        :return: True if the address is a loopback address. Otherwise False.
-        '''
-        return 127 == self.dotted_quad[0]
-
-    @property
-    def reverse_pointer(self):
-        '''
-        :return: Reversed IP address
-        '''
-        return '.'.join(reversed(self.dotted_quad)) + '.in-addr.arpa.'
