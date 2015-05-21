@@ -766,9 +766,11 @@ class Minion(MinionBase):
                 log.error(msg)
                 sys.exit(salt.defaults.exitcodes.EX_GENERIC)
 
+        # check if DNS name resolves to multiple A records
+
         # if we have a list of masters, loop through them and be
         # happy with the first one that allows us to connect
-        if isinstance(opts['master'], list):
+        if isinstance(opts['master'], list) or len(salt.util.dns_check_all(opts['master'])) > 1:
             conn = False
             # shuffle the masters and then loop through them
             local_masters = copy.copy(opts['master'])

@@ -523,6 +523,47 @@ def dns_check(addr, safe=False, ipv6=False):
     return addr
 
 
+def dns_check_all(addr, safe=False, ipv6=False):
+    '''
+    Return all ip addresses resolved by dns, but do not exit on failure, only raise an
+    exception. Obeys system preference for IPv4/6 address resolution.
+    '''
+    error = False
+    addrs = []
+    try:
+        hostnames = socket.getaddrinfo(
+            addr, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+        if not hostnames:
+            error = True
+        else:
+            for h in hostnames:
+                addr = False
+                if h[0] == socket.AF_INET or (h[0] == socket.AF_INET6 and ipv6):
+                    addr = ip_bracket(h[4][0])
+                if not addr:
+                    error = True
+                    break
+                else:
+                    addrs.append(addr)
+    except TypeError:
+        err = ('Attempt to resolve address \'{0}\' failed. Invalid or unresolveable address').format(addr)
+        raise SaltSystemExit(code=42, msg=err)
+    except socket.error:
+        error = True
+
+    if error:
+        err = ('DNS lookup of \'{0}\' failed.').format(addr)
+        if safe:
+            if salt.log.is_console_configured():
+                # If logging is not configured it also means that either
+                # the master or minion instance calling this hasn't even
+                # started running
+                log.error(err)
+            raise SaltClientError()
+        raise SaltSystemExit(code=42, msg=err)
+    return addrs
+
 def required_module_list(docstring=None):
     '''
     Return a list of python modules required by a salt module that aren't
